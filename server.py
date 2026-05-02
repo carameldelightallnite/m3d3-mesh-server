@@ -1,5 +1,5 @@
 # =========================================================
-# M3D3 SERVER — WORKING (SL COMPATIBLE)
+# M3D3 SERVER — FULL FINAL (RENDER READY + ZIP DELIVERY)
 # =========================================================
 
 import os
@@ -31,7 +31,7 @@ def parse_m3(data_string):
     }
 
 # =========================
-# SIMPLE STABLE ENGINE
+# ENGINE
 # =========================
 
 def build_mesh(p, seg, rings):
@@ -134,29 +134,42 @@ def generate_pack(p, job_id):
 # ROUTES
 # =========================
 
+@app.route("/")
+def home():
+    return "M3D3 SERVER RUNNING"
+
 @app.route("/generate", methods=["POST"])
 def generate():
     data = request.get_json()
     m3 = data.get("m3")
 
-    p = parse_m3(m3)
+    try:
+        p = parse_m3(m3)
+    except:
+        return jsonify({"error": "INVALID M3 STRING"}), 400
 
     job_id = str(len(os.listdir(OUTPUT_DIR)))
 
     generate_pack(p, job_id)
 
-    # 🔥 RETURN URL (NOT FILE)
-    url = f"https://YOUR_PUBLIC_URL/download/{job_id}/mesh_pack.zip"
+    base_url = request.host_url.rstrip("/")
+
+    url = f"{base_url}/download/{job_id}/mesh_pack.zip"
 
     return jsonify({"url": url})
 
 @app.route("/download/<job>/<filename>")
 def download(job, filename):
-    return send_from_directory(os.path.join(OUTPUT_DIR, job), filename, as_attachment=True)
+    return send_from_directory(
+        os.path.join(OUTPUT_DIR, job),
+        filename,
+        as_attachment=True
+    )
 
 # =========================
-# RUN
+# RUN (RENDER READY)
 # =========================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
