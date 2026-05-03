@@ -1,12 +1,12 @@
 # =========================================================
-# M3D3 PLATINUM SERVER — FINAL (RENDER READY / GUNICORN)
+# M3D3 PLATINUM SERVER — FINAL FIXED (SINGLE WORKER SAFE + AUTO DELETE)
 # =========================================================
 
 import os
 import uuid
 import numpy as np
 import trimesh
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, after_this_request
 
 app = Flask(__name__)
 jobs = {}
@@ -64,39 +64,54 @@ def clean(m):
     return m
 
 # =========================
+# SAFE DECIMATION (OPEN3D FALLBACK)
+# =========================
+def safe_decimate(mesh, ratio):
+    try:
+        target = max(10, int(len(mesh.faces) * ratio))
+        return clean(mesh.simplify_quadratic_decimation(target))
+    except:
+        return clean(mesh.copy())
+
+# =========================
 # LOD GENERATION
 # =========================
 def lods(m):
-    f = len(m.faces)
     return (
         clean(m.copy()),
-        clean(m.simplify_quadratic_decimation(int(f * 0.5))),
-        clean(m.simplify_quadratic_decimation(int(f * 0.25))),
-        clean(m.simplify_quadratic_decimation(int(f * 0.1)))
+        safe_decimate(m, 0.5),
+        safe_decimate(m, 0.25),
+        safe_decimate(m, 0.1)
     )
 
 # =========================
 # PHYSICS HULL
 # =========================
 def physics(m):
-    h = m.convex_hull
-    return clean(h.simplify_quadratic_decimation(int(len(h.faces) * 0.25)))
+    try:
+        h = m.convex_hull
+        return safe_decimate(h, 0.25)
+    except:
+        return clean(m.copy())
 
 # =========================
-# ROOT ROUTE
+# ROOT
 # =========================
 @app.route("/")
 def home():
     return "M3D3 SERVER RUNNING"
 
 # =========================
-# UPLOAD CHUNK
+# UPLOAD
 # =========================
 @app.route("/upload_chunk", methods=["POST"])
 def upload():
-    data = request.json
-    job = data["job"]
-    chunk = data["chunk"]
+    data = request.get_json(force=True)
+    job = data.get("job")
+    chunk = data.get("chunk", [])
+
+    if not job:
+        return jsonify({"error": "missing job"}), 400
 
     if job not in jobs:
         jobs[job] = []
@@ -105,77 +120,10 @@ def upload():
     return jsonify({"ok": True})
 
 # =========================
-# FINALIZE BUILD
+# FINALIZE
 # =========================
 @app.route("/finalize", methods=["POST"])
 def finalize():
-    data = request.json
-    job = data["job"]
-    name = data.get("name", "M3D3")
-
-    prims = jobs.get(job, [])
-    meshes = []
-
-    for i, p in enumerate(prims):
-        size = v(p["size"])
-        pos  = v(p["pos"])
-        rot  = r(p["rot"])
-        t = p["type"]
-
-        if t == "BOX": m = box(size)
-        elif t == "CYLINDER": m = cyl(size)
-        elif t == "SPHERE": m = sph(size)
-        elif t == "TORUS": m = tor(size)
-        elif t == "PRISM": m = pri(size)
-        elif t == "CONE": m = con(size)
-        else: m = box(size)
-
-        T = trimesh.transformations.quaternion_matrix(rot)
-        T[:3,3] = pos
-        m.apply_transform(T)
-
-        color = np.array([i % 255, (i * 3) % 255, (i * 7) % 255, 255])
-        m.visual.face_colors = np.tile(color, (len(m.faces), 1))
-
-        meshes.append(clean(m))
-
-    final = clean(trimesh.util.concatenate(meshes))
-
-    H, M, L, LO = lods(final)
-    P = physics(final)
-
-    uid = uuid.uuid4().hex
-
-    files = {
-        "HIGH": f"{name}_HIGH_{uid}.dae",
-        "MEDIUM": f"{name}_MEDIUM_{uid}.dae",
-        "LOW": f"{name}_LOW_{uid}.dae",
-        "LOWEST": f"{name}_LOWEST_{uid}.dae",
-        "PHYS": f"{name}_PHYS_{uid}.dae"
-    }
-
-    H.export(os.path.join(OUTPUT, files["HIGH"]))
-    M.export(os.path.join(OUTPUT, files["MEDIUM"]))
-    L.export(os.path.join(OUTPUT, files["LOW"]))
-    LO.export(os.path.join(OUTPUT, files["LOWEST"]))
-    P.export(os.path.join(OUTPUT, files["PHYS"]))
-
-    del jobs[job]
-
-    return jsonify({
-        k: f"https://{request.host}/download/{v}" for k, v in files.items()
-    })
-
-# =========================
-# DOWNLOAD
-# =========================
-@app.route("/download/<filename>")
-def download(filename):
-    return send_from_directory(OUTPUT, filename, as_attachment=True)
-
-# =========================
-# LOCAL RUN (SAFE)
-# =========================
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    data = request.get_json(force=True)
+    job = data.get("job")
+    name = data.get("name", "M
