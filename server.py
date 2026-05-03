@@ -1,208 +1,221 @@
 # =========================================================
-# M3D3 MERGE ENGINE — CHUNKED (RENDER READY)
+# M3D3 MERGE ENGINE — V3 (LOD + PHYSICS + MATERIALS + WELD)
 # =========================================================
 
 import os
 import uuid
-import json
 import numpy as np
 import trimesh
 from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask(__name__)
-
-# In-memory job store (use Redis in production)
 jobs = {}
-
 OUTPUT_DIR = "outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# -------------------------
-# HELPERS
-# -------------------------
+# =========================
+# PARSERS
+# =========================
 
-def parse_vec3(s):
-    # accepts "<x, y, z>" or "x, y, z"
-    s = s.strip().replace("<", "").replace(">", "")
-    return np.fromstring(s, sep=',')
+def parse_vec(s):
+    return np.fromstring(s.replace("<","").replace(">",""), sep=',')
 
-def parse_quat_lsl(s):
-    # LSL: <x, y, z, s>  → trimesh expects [w, x, y, z]
-    s = s.strip().replace("<", "").replace(">", "")
-    q = np.fromstring(s, sep=',')
-    if len(q) != 4:
-        return np.array([1, 0, 0, 0])
+def parse_rot(s):
+    q = parse_vec(s)
     return np.array([q[3], q[0], q[1], q[2]])
 
-def make_primitive(p):
-    p_type = p.get("type", "BOX").upper()
-    size = parse_vec3(p.get("size", "1,1,1"))
-    size = np.maximum(size, 1e-6)
+# =========================
+# BUILDERS
+# =========================
 
-    if p_type == "BOX":
-        return trimesh.creation.box(extents=size)
-
-    if p_type == "CYLINDER":
-        r = max(size[0], size[1]) * 0.5
-        h = size[2]
-        return trimesh.creation.cylinder(radius=r, height=h, sections=24)
-
-    if p_type == "SPHERE":
-        r = max(size) * 0.5
-        return trimesh.creation.uv_sphere(radius=r, count=[24, 24])
-
-    if p_type == "PRISM":
-        # triangular prism
-        r = max(size[0], size[1]) * 0.5
-        h = size[2]
-        return trimesh.creation.cone(radius=r, height=h, sections=3)
-
-    if p_type in ("TORUS", "TUBE", "RING"):
-        # approximate torus (major radius from size.x, minor from size.y)
-        R = max(size[0], 1e-3)
-        r = max(size[1], 1e-3) * 0.5
-        return trimesh.creation.torus(radius=R, tube_radius=r, sections=32, segments=24)
-
-    # fallback
+def build_box(size):
     return trimesh.creation.box(extents=size)
 
-def apply_transform(m, p):
-    pos = parse_vec3(p.get("pos", "0,0,0"))
-    quat = parse_quat_lsl(p.get("rot", "0,0,0,1"))
+def build_cylinder(size):
+    return trimesh.creation.cylinder(radius=size[0]*0.5, height=size[2], sections=32)
 
-    T = trimesh.transformations.quaternion_matrix(quat)
-    T[:3, 3] = pos
-    m.apply_transform(T)
+def build_sphere(size):
+    return trimesh.creation.uv_sphere(radius=size[0]*0.5, count=[32,32])
 
-def apply_deformation(m, p):
-    # NOTE: prim deformations (taper/twist/hollow/shear) are not native in trimesh.
-    # This is a light approximation stage; exact SL parity requires custom vertex ops.
+def build_torus(size):
+    return trimesh.creation.torus(radius=size[0]*0.5, tube_radius=size[1]*0.25, sections=48, segments=24)
 
-    # simple twist around Z
-    twist = p.get("twist", "0,0,0")
-    try:
-        t = parse_vec3(twist)
-        total = float(t[1]) if len(t) > 1 else 0.0
-    except:
-        total = 0.0
+def build_prism(size):
+    b = size[0]*0.5
+    h = size[2]
+    v = np.array([
+        [-b,-b,0],[ b,-b,0],[0,b,0],
+        [-b,-b,h],[ b,-b,h],[0,b,h]
+    ])
+    f = np.array([
+        [0,1,2],[3,5,4],
+        [0,1,4],[0,4,3],
+        [1,2,5],[1,5,4],
+        [2,0,3],[2,3,5]
+    ])
+    return trimesh.Trimesh(vertices=v, faces=f)
 
-    if abs(total) > 0.0:
-        z = m.vertices[:, 2]
-        zmin, zmax = z.min(), z.max()
-        span = max(zmax - zmin, 1e-6)
-        ang = (z - zmin) / span * np.deg2rad(total)
-        c, s = np.cos(ang), np.sin(ang)
-        x, y = m.vertices[:, 0].copy(), m.vertices[:, 1].copy()
-        m.vertices[:, 0] = x * c - y * s
-        m.vertices[:, 1] = x * s + y * c
+def build_cone(size):
+    return trimesh.creation.cone(radius=size[0]*0.5, height=size[2], sections=32)
 
-    # taper (scale XY along Z)
-    taper = p.get("taper", "0,0,0")
-    try:
-        tv = parse_vec3(taper)
-        tx = float(tv[0]); ty = float(tv[1])
-    except:
-        tx = ty = 0.0
+# =========================
+# CLEAN + UV + NORMALS
+# =========================
 
-    if abs(tx) > 0.0 or abs(ty) > 0.0:
-        z = m.vertices[:, 2]
-        zmin, zmax = z.min(), z.max()
-        t = (z - zmin) / max(zmax - zmin, 1e-6)
-        sx = 1.0 - tx * t
-        sy = 1.0 - ty * t
-        m.vertices[:, 0] *= sx
-        m.vertices[:, 1] *= sy
+def finalize_mesh(mesh):
+    mesh.remove_duplicate_faces()
+    mesh.remove_degenerate_faces()
+    mesh.remove_unreferenced_vertices()
+    mesh.merge_vertices(digits=4)
+    mesh.fix_normals()
 
-    # shear (simple XY offset along Z)
-    shear = p.get("shear", "0,0,0")
-    try:
-        sv = parse_vec3(shear)
-        shx = float(sv[0]); shy = float(sv[1])
-    except:
-        shx = shy = 0.0
+    if not mesh.visual.uv:
+        uv = mesh.vertices[:, :2]
+        mesh.visual = trimesh.visual.TextureVisuals(uv=uv)
 
-    if abs(shx) > 0.0 or abs(shy) > 0.0:
-        z = m.vertices[:, 2]
-        zmin, zmax = z.min(), z.max()
-        t = (z - zmin) / max(zmax - zmin, 1e-6)
-        m.vertices[:, 0] += shx * t
-        m.vertices[:, 1] += shy * t
+    return mesh
 
-    # hollow omitted here (non-trivial boolean). Keep for later if needed.
+# =========================
+# LOD GENERATION
+# =========================
 
-# -------------------------
+def generate_lods(mesh):
+    vcount = len(mesh.faces)
+
+    lod_high = mesh.copy()
+
+    lod_medium = mesh.simplify_quadratic_decimation(int(vcount * 0.5))
+    lod_low    = mesh.simplify_quadratic_decimation(int(vcount * 0.25))
+    lod_lowest = mesh.simplify_quadratic_decimation(int(vcount * 0.1))
+
+    return (
+        finalize_mesh(lod_high),
+        finalize_mesh(lod_medium),
+        finalize_mesh(lod_low),
+        finalize_mesh(lod_lowest)
+    )
+
+# =========================
+# PHYSICS MODEL (LOW COST)
+# =========================
+
+def build_physics(mesh):
+    hull = mesh.convex_hull
+    hull = hull.simplify_quadratic_decimation(int(len(hull.faces) * 0.25))
+    return finalize_mesh(hull)
+
+# =========================
 # ROUTES
-# -------------------------
+# =========================
 
 @app.route("/")
 def home():
-    return "M3D3 MERGE ENGINE RUNNING"
+    return "M3D3 SERVER V3 LIVE"
 
 @app.route("/upload_chunk", methods=["POST"])
 def upload_chunk():
-    data = request.get_json(force=True)
-    job_id = data.get("job")
-    chunk = data.get("chunk", [])
+    data = request.json
+    job = data["job"]
+    chunk = data["chunk"]
 
-    if not job_id:
-        return jsonify({"error": "missing job id"}), 400
+    if job not in jobs:
+        jobs[job] = []
 
-    if job_id not in jobs:
-        jobs[job_id] = []
+    jobs[job].extend(chunk)
 
-    jobs[job_id].extend(chunk)
-    return jsonify({"status": "chunk received"}), 200
+    return jsonify({"ok": True})
 
 @app.route("/finalize", methods=["POST"])
 def finalize():
-    data = request.get_json(force=True)
-    job_id = data.get("job")
-    name = data.get("name", "M3D3_Export")
+    data = request.json
+    job = data["job"]
+    name = data.get("name", "M3D3")
 
-    if job_id not in jobs:
-        return jsonify({"error": "job not found"}), 404
-
-    prims = jobs[job_id]
+    prims = jobs.get(job, [])
     meshes = []
+    materials = []
 
-    for p in prims:
-        try:
-            m = make_primitive(p)
-            apply_deformation(m, p)
-            apply_transform(m, p)
-            meshes.append(m)
-        except Exception as e:
-            # skip bad prim but continue
-            continue
+    for idx, p in enumerate(prims):
+        size = parse_vec(p["size"])
+        pos  = parse_vec(p["pos"])
+        rot  = parse_rot(p["rot"])
+        t = p["type"]
 
-    if not meshes:
-        return jsonify({"error": "no meshes built"}), 500
+        if t == "BOX":
+            m = build_box(size)
+        elif t == "CYLINDER":
+            m = build_cylinder(size)
+        elif t == "SPHERE":
+            m = build_sphere(size)
+        elif t == "TORUS":
+            m = build_torus(size)
+        elif t == "PRISM":
+            m = build_prism(size)
+        elif t == "CONE":
+            m = build_cone(size)
+        else:
+            m = build_box(size)
 
-    final_mesh = trimesh.util.concatenate(meshes)
+        T = trimesh.transformations.quaternion_matrix(rot)
+        T[:3,3] = pos
+        m.apply_transform(T)
 
-    filename = f"{name}_{uuid.uuid4().hex}.dae"
-    filepath = os.path.join(OUTPUT_DIR, filename)
+        m = finalize_mesh(m)
 
-    # export Collada
-    final_mesh.export(filepath)
+        # MATERIAL ID PER PRIM
+        m.visual.face_colors = np.tile(
+            np.array([idx % 255, (idx*3)%255, (idx*7)%255, 255]),
+            (len(m.faces),1)
+        )
 
-    # cleanup
-    del jobs[job_id]
+        meshes.append(m)
 
-    url = f"https://{request.host}/download/{filename}"
+    # =========================
+    # MERGE + WELD
+    # =========================
+
+    final = trimesh.util.concatenate(meshes)
+    final = finalize_mesh(final)
+
+    # =========================
+    # LODs
+    # =========================
+
+    high, medium, low, lowest = generate_lods(final)
+
+    # =========================
+    # PHYSICS
+    # =========================
+
+    physics = build_physics(final)
+
+    uid = uuid.uuid4().hex
+
+    f_high   = f"{name}_HIGH_{uid}.dae"
+    f_med    = f"{name}_MED_{uid}.dae"
+    f_low    = f"{name}_LOW_{uid}.dae"
+    f_lowest = f"{name}_LOWEST_{uid}.dae"
+    f_phys   = f"{name}_PHYS_{uid}.dae"
+
+    high.export(os.path.join(OUTPUT_DIR, f_high))
+    medium.export(os.path.join(OUTPUT_DIR, f_med))
+    low.export(os.path.join(OUTPUT_DIR, f_low))
+    lowest.export(os.path.join(OUTPUT_DIR, f_lowest))
+    physics.export(os.path.join(OUTPUT_DIR, f_phys))
+
+    del jobs[job]
 
     return jsonify({
-        "status": "complete",
-        "url": url
-    }), 200
+        "HIGH":   f"https://{request.host}/download/{f_high}",
+        "MEDIUM": f"https://{request.host}/download/{f_med}",
+        "LOW":    f"https://{request.host}/download/{f_low}",
+        "LOWEST": f"https://{request.host}/download/{f_lowest}",
+        "PHYS":   f"https://{request.host}/download/{f_phys}"
+    })
 
 @app.route("/download/<filename>")
 def download(filename):
     return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
-
-# -------------------------
-# RUN (RENDER READY)
-# -------------------------
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
