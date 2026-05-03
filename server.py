@@ -1,173 +1,208 @@
 # =========================================================
-# M3D3 SERVER — FULL FINAL (RENDER READY + HTTPS FIX)
+# M3D3 MERGE ENGINE — CHUNKED (RENDER READY)
 # =========================================================
 
 import os
-import zipfile
-import math
-from flask import Flask, request, send_from_directory, jsonify
+import uuid
+import json
+import numpy as np
+import trimesh
+from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask(__name__)
 
-OUTPUT_DIR = "output"
+# In-memory job store (use Redis in production)
+jobs = {}
+
+OUTPUT_DIR = "outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# =========================
-# PARSER
-# =========================
+# -------------------------
+# HELPERS
+# -------------------------
 
-def parse_m3(data_string):
-    p = data_string.strip().split('|')
-    if len(p) != 23 or p[0] != "M3FULL":
-        raise ValueError("INVALID INPUT")
+def parse_vec3(s):
+    # accepts "<x, y, z>" or "x, y, z"
+    s = s.strip().replace("<", "").replace(">", "")
+    return np.fromstring(s, sep=',')
 
-    def f(x): return float(x)
-    def i(x): return int(x)
-    def v(x): return [float(n) for n in x.strip('<>').split(',')]
+def parse_quat_lsl(s):
+    # LSL: <x, y, z, s>  → trimesh expects [w, x, y, z]
+    s = s.strip().replace("<", "").replace(">", "")
+    q = np.fromstring(s, sep=',')
+    if len(q) != 4:
+        return np.array([1, 0, 0, 0])
+    return np.array([q[3], q[0], q[1], q[2]])
 
-    return {
-        "type": p[1].upper(),
-        "size": v(p[2]),
-    }
+def make_primitive(p):
+    p_type = p.get("type", "BOX").upper()
+    size = parse_vec3(p.get("size", "1,1,1"))
+    size = np.maximum(size, 1e-6)
 
-# =========================
-# ENGINE
-# =========================
+    if p_type == "BOX":
+        return trimesh.creation.box(extents=size)
 
-def build_mesh(p, seg, rings):
-    verts, faces = [], []
-    sx, sy, sz = p["size"]
+    if p_type == "CYLINDER":
+        r = max(size[0], size[1]) * 0.5
+        h = size[2]
+        return trimesh.creation.cylinder(radius=r, height=h, sections=24)
 
-    for i in range(rings):
-        t = i / rings
-        theta = 2 * math.pi * t
+    if p_type == "SPHERE":
+        r = max(size) * 0.5
+        return trimesh.creation.uv_sphere(radius=r, count=[24, 24])
 
-        for j in range(seg):
-            ang = (j / seg) * 2 * math.pi
-            px, py = math.cos(ang)*0.5, math.sin(ang)*0.5
+    if p_type == "PRISM":
+        # triangular prism
+        r = max(size[0], size[1]) * 0.5
+        h = size[2]
+        return trimesh.creation.cone(radius=r, height=h, sections=3)
 
-            x = (sx*0.5 + px*sz*0.5) * math.cos(theta)
-            y = (sx*0.5 + px*sz*0.5) * math.sin(theta)
-            z = py * sy
+    if p_type in ("TORUS", "TUBE", "RING"):
+        # approximate torus (major radius from size.x, minor from size.y)
+        R = max(size[0], 1e-3)
+        r = max(size[1], 1e-3) * 0.5
+        return trimesh.creation.torus(radius=R, tube_radius=r, sections=32, segments=24)
 
-            verts.append((x,y,z))
+    # fallback
+    return trimesh.creation.box(extents=size)
 
-    for i in range(rings):
-        for j in range(seg):
-            a = i*seg + j
-            b = i*seg + (j+1)%seg
-            c = ((i+1)%rings)*seg + j
-            d = ((i+1)%rings)*seg + (j+1)%seg
+def apply_transform(m, p):
+    pos = parse_vec3(p.get("pos", "0,0,0"))
+    quat = parse_quat_lsl(p.get("rot", "0,0,0,1"))
 
-            faces.append((a,b,c))
-            faces.append((b,d,c))
+    T = trimesh.transformations.quaternion_matrix(quat)
+    T[:3, 3] = pos
+    m.apply_transform(T)
 
-    return verts, faces
+def apply_deformation(m, p):
+    # NOTE: prim deformations (taper/twist/hollow/shear) are not native in trimesh.
+    # This is a light approximation stage; exact SL parity requires custom vertex ops.
 
-# =========================
-# EXPORT
-# =========================
+    # simple twist around Z
+    twist = p.get("twist", "0,0,0")
+    try:
+        t = parse_vec3(twist)
+        total = float(t[1]) if len(t) > 1 else 0.0
+    except:
+        total = 0.0
 
-def write_dae(mesh, path):
-    v,f = mesh
+    if abs(total) > 0.0:
+        z = m.vertices[:, 2]
+        zmin, zmax = z.min(), z.max()
+        span = max(zmax - zmin, 1e-6)
+        ang = (z - zmin) / span * np.deg2rad(total)
+        c, s = np.cos(ang), np.sin(ang)
+        x, y = m.vertices[:, 0].copy(), m.vertices[:, 1].copy()
+        m.vertices[:, 0] = x * c - y * s
+        m.vertices[:, 1] = x * s + y * c
 
-    vs = " ".join(f"{x} {y} {z}" for x,y,z in v)
+    # taper (scale XY along Z)
+    taper = p.get("taper", "0,0,0")
+    try:
+        tv = parse_vec3(taper)
+        tx = float(tv[0]); ty = float(tv[1])
+    except:
+        tx = ty = 0.0
 
-    idx=[]
-    for face in f:
-        for i in face:
-            idx.append(i)
+    if abs(tx) > 0.0 or abs(ty) > 0.0:
+        z = m.vertices[:, 2]
+        zmin, zmax = z.min(), z.max()
+        t = (z - zmin) / max(zmax - zmin, 1e-6)
+        sx = 1.0 - tx * t
+        sy = 1.0 - ty * t
+        m.vertices[:, 0] *= sx
+        m.vertices[:, 1] *= sy
 
-    ps = " ".join(map(str,idx))
+    # shear (simple XY offset along Z)
+    shear = p.get("shear", "0,0,0")
+    try:
+        sv = parse_vec3(shear)
+        shx = float(sv[0]); shy = float(sv[1])
+    except:
+        shx = shy = 0.0
 
-    xml=f'''<?xml version="1.0"?>
-<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
-<asset><unit name="meter" meter="1"/><up_axis>Z_UP</up_axis></asset>
-<library_geometries>
-<geometry id="mesh"><mesh>
-<source id="p"><float_array id="pa" count="{len(v)*3}">{vs}</float_array></source>
-<vertices id="v"><input semantic="POSITION" source="#p"/></vertices>
-<triangles count="{len(f)}">
-<input semantic="VERTEX" source="#v" offset="0"/>
-<p>{ps}</p>
-</triangles>
-</mesh></geometry>
-</library_geometries>
-</COLLADA>'''
+    if abs(shx) > 0.0 or abs(shy) > 0.0:
+        z = m.vertices[:, 2]
+        zmin, zmax = z.min(), z.max()
+        t = (z - zmin) / max(zmax - zmin, 1e-6)
+        m.vertices[:, 0] += shx * t
+        m.vertices[:, 1] += shy * t
 
-    with open(path,"w") as f:
-        f.write(xml)
+    # hollow omitted here (non-trivial boolean). Keep for later if needed.
 
-# =========================
-# GENERATE PACK
-# =========================
-
-def generate_pack(p, job_id):
-
-    job_folder = os.path.join(OUTPUT_DIR, job_id)
-    os.makedirs(job_folder, exist_ok=True)
-
-    lods = {
-        "high": (12,16),
-        "med": (6,6),
-        "low": (4,4),
-        "lowest": (3,3)
-    }
-
-    files = []
-
-    for name,(seg,rings) in lods.items():
-        mesh = build_mesh(p, seg, rings)
-        path = os.path.join(job_folder, f"{name}.dae")
-        write_dae(mesh, path)
-        files.append(path)
-
-    zip_path = os.path.join(job_folder, "mesh_pack.zip")
-
-    with zipfile.ZipFile(zip_path, 'w') as z:
-        for f in files:
-            z.write(f, os.path.basename(f))
-
-    return job_id
-
-# =========================
+# -------------------------
 # ROUTES
-# =========================
+# -------------------------
 
 @app.route("/")
 def home():
-    return "M3D3 SERVER RUNNING"
+    return "M3D3 MERGE ENGINE RUNNING"
 
-@app.route("/generate", methods=["POST"])
-def generate():
-    data = request.get_json()
-    m3 = data.get("m3")
+@app.route("/upload_chunk", methods=["POST"])
+def upload_chunk():
+    data = request.get_json(force=True)
+    job_id = data.get("job")
+    chunk = data.get("chunk", [])
 
-    try:
-        p = parse_m3(m3)
-    except:
-        return jsonify({"error": "INVALID M3 STRING"}), 400
+    if not job_id:
+        return jsonify({"error": "missing job id"}), 400
 
-    job_id = str(len(os.listdir(OUTPUT_DIR)))
+    if job_id not in jobs:
+        jobs[job_id] = []
 
-    generate_pack(p, job_id)
+    jobs[job_id].extend(chunk)
+    return jsonify({"status": "chunk received"}), 200
 
-    # 🔥 FORCE HTTPS FIX (CRITICAL)
-    url = f"https://{request.host}/download/{job_id}/mesh_pack.zip"
+@app.route("/finalize", methods=["POST"])
+def finalize():
+    data = request.get_json(force=True)
+    job_id = data.get("job")
+    name = data.get("name", "M3D3_Export")
 
-    return jsonify({"url": url})
+    if job_id not in jobs:
+        return jsonify({"error": "job not found"}), 404
 
-@app.route("/download/<job>/<filename>")
-def download(job, filename):
-    return send_from_directory(
-        os.path.join(OUTPUT_DIR, job),
-        filename,
-        as_attachment=True
-    )
+    prims = jobs[job_id]
+    meshes = []
 
-# =========================
+    for p in prims:
+        try:
+            m = make_primitive(p)
+            apply_deformation(m, p)
+            apply_transform(m, p)
+            meshes.append(m)
+        except Exception as e:
+            # skip bad prim but continue
+            continue
+
+    if not meshes:
+        return jsonify({"error": "no meshes built"}), 500
+
+    final_mesh = trimesh.util.concatenate(meshes)
+
+    filename = f"{name}_{uuid.uuid4().hex}.dae"
+    filepath = os.path.join(OUTPUT_DIR, filename)
+
+    # export Collada
+    final_mesh.export(filepath)
+
+    # cleanup
+    del jobs[job_id]
+
+    url = f"https://{request.host}/download/{filename}"
+
+    return jsonify({
+        "status": "complete",
+        "url": url
+    }), 200
+
+@app.route("/download/<filename>")
+def download(filename):
+    return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+
+# -------------------------
 # RUN (RENDER READY)
-# =========================
+# -------------------------
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
