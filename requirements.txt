@@ -1,9 +1,8 @@
 flask
 trimesh[all]
-numpy
+numpy<2.0.0
 scipy
 rtree
-pyrender
-lxml
-gunicorn
 pycollada
+fast-simplification
+gunicorn
