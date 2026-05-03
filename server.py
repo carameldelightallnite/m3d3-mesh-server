@@ -1,6 +1,6 @@
 # =========================================================
-# M3D3 PLATINUM SERVER — FINAL COMMERCIAL BUILD
-# LSL → Python → Trimesh → LOD → Physics → DAE Download
+# M3D3 PLATINUM SERVER — SL-SAFE COLLADA EXPORT BUILD
+# Fixes blank preview + MAV upload errors
 # =========================================================
 
 import os
@@ -8,16 +8,13 @@ import re
 import time
 import uuid
 import traceback
+import html
 import numpy as np
 import trimesh
 
 from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask(__name__)
-
-# =========================================================
-# GLOBAL STORAGE
-# =========================================================
 
 jobs = {}
 
@@ -33,11 +30,11 @@ FILE_TTL_SECONDS = 1800
 # =========================================================
 
 def safe_name(name):
-    name = str(name or "M3D3_Export")
+    name = str(name or "Object")
     name = name.replace(" ", "_")
     name = "".join(c for c in name if c.isalnum() or c == "_")
     if name == "":
-        name = "M3D3_Export"
+        name = "Object"
     return name
 
 
@@ -292,13 +289,6 @@ def clean_mesh(mesh):
     except Exception:
         pass
 
-    try:
-        if getattr(mesh.visual, "uv", None) is None:
-            uv = mesh.vertices[:, :2].copy()
-            mesh.visual = trimesh.visual.TextureVisuals(uv=uv)
-    except Exception:
-        pass
-
     return mesh
 
 
@@ -336,17 +326,153 @@ def make_physics(high):
         return decimate_mesh(high, 0.10)
 
 
-def export_mesh(mesh, filename):
-    path = os.path.join(OUTPUT_DIR, filename)
+# =========================================================
+# SECOND LIFE SAFE COLLADA WRITER
+# =========================================================
 
-    mesh.export(path)
+def float_list(values):
+    return " ".join(f"{float(v):.6f}" for v in values)
+
+
+def int_list(values):
+    return " ".join(str(int(v)) for v in values)
+
+
+def write_sl_safe_dae(mesh, path, mesh_name="M3D3Mesh"):
+    mesh = clean_mesh(mesh)
+
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    faces = np.asarray(mesh.faces, dtype=int)
+
+    if len(vertices) == 0 or len(faces) == 0:
+        raise RuntimeError("Cannot export empty mesh.")
+
+    try:
+        normals = np.asarray(mesh.vertex_normals, dtype=float)
+    except Exception:
+        normals = np.zeros_like(vertices)
+        normals[:, 2] = 1.0
+
+    safe_mesh_name = safe_name(mesh_name)
+
+    pos_values = float_list(vertices.reshape(-1))
+    normal_values = float_list(normals.reshape(-1))
+
+    p_values = []
+    for face in faces:
+        for idx in face:
+            p_values.append(idx)
+            p_values.append(idx)
+
+    dae = f'''<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <contributor>
+      <authoring_tool>M3D3 Platinum SL-Safe Exporter</authoring_tool>
+    </contributor>
+    <created>2026-01-01T00:00:00Z</created>
+    <modified>2026-01-01T00:00:00Z</modified>
+    <unit name="meter" meter="1"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+
+  <library_effects>
+    <effect id="mat_effect">
+      <profile_COMMON>
+        <technique sid="common">
+          <phong>
+            <diffuse>
+              <color>0.8 0.8 0.8 1</color>
+            </diffuse>
+          </phong>
+        </technique>
+      </profile_COMMON>
+    </effect>
+  </library_effects>
+
+  <library_materials>
+    <material id="mat" name="mat">
+      <instance_effect url="#mat_effect"/>
+    </material>
+  </library_materials>
+
+  <library_geometries>
+    <geometry id="{safe_mesh_name}_geometry" name="{safe_mesh_name}">
+      <mesh>
+        <source id="{safe_mesh_name}_positions">
+          <float_array id="{safe_mesh_name}_positions_array" count="{len(vertices) * 3}">
+            {pos_values}
+          </float_array>
+          <technique_common>
+            <accessor source="#{safe_mesh_name}_positions_array" count="{len(vertices)}" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+
+        <source id="{safe_mesh_name}_normals">
+          <float_array id="{safe_mesh_name}_normals_array" count="{len(normals) * 3}">
+            {normal_values}
+          </float_array>
+          <technique_common>
+            <accessor source="#{safe_mesh_name}_normals_array" count="{len(normals)}" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+
+        <vertices id="{safe_mesh_name}_vertices">
+          <input semantic="POSITION" source="#{safe_mesh_name}_positions"/>
+        </vertices>
+
+        <triangles material="mat" count="{len(faces)}">
+          <input semantic="VERTEX" source="#{safe_mesh_name}_vertices" offset="0"/>
+          <input semantic="NORMAL" source="#{safe_mesh_name}_normals" offset="1"/>
+          <p>{int_list(p_values)}</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="{safe_mesh_name}_node" name="{safe_mesh_name}">
+        <instance_geometry url="#{safe_mesh_name}_geometry">
+          <bind_material>
+            <technique_common>
+              <instance_material symbol="mat" target="#mat"/>
+            </technique_common>
+          </bind_material>
+        </instance_geometry>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>
+'''
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(dae)
 
     if not os.path.exists(path):
-        raise RuntimeError("Export failed: " + filename)
+        raise RuntimeError("DAE export failed.")
 
     if os.path.getsize(path) <= 0:
-        raise RuntimeError("Export created empty file: " + filename)
+        raise RuntimeError("DAE export created empty file.")
 
+    return path
+
+
+def export_mesh(mesh, filename, mesh_name):
+    path = os.path.join(OUTPUT_DIR, filename)
+    write_sl_safe_dae(mesh, path, mesh_name)
     return path
 
 
@@ -363,7 +489,7 @@ def home():
 def health():
     return jsonify({
         "ok": True,
-        "server": "M3D3 Platinum",
+        "server": "M3D3 Platinum SL-Safe Exporter",
         "outputs": os.listdir(OUTPUT_DIR),
         "jobs": list(jobs.keys())
     })
@@ -444,18 +570,6 @@ def finalize():
                 transform[:3, 3] = pos
                 mesh.apply_transform(transform)
 
-                color = np.array([
-                    (index * 45) % 255,
-                    (index * 75) % 255,
-                    (index * 115) % 255,
-                    255
-                ], dtype=np.uint8)
-
-                mesh.visual.face_colors = np.tile(
-                    color,
-                    (len(mesh.faces), 1)
-                )
-
                 meshes.append(clean_mesh(mesh))
 
             except Exception as prim_error:
@@ -481,11 +595,11 @@ def finalize():
             "PHYS": f"{name}_PHYS_{uid}.dae"
         }
 
-        export_mesh(high, files["HIGH"])
-        export_mesh(medium, files["MEDIUM"])
-        export_mesh(low, files["LOW"])
-        export_mesh(lowest, files["LOWEST"])
-        export_mesh(phys, files["PHYS"])
+        export_mesh(high, files["HIGH"], f"{name}_HIGH")
+        export_mesh(medium, files["MEDIUM"], f"{name}_MEDIUM")
+        export_mesh(low, files["LOW"], f"{name}_LOW")
+        export_mesh(lowest, files["LOWEST"], f"{name}_LOWEST")
+        export_mesh(phys, files["PHYS"], f"{name}_PHYS")
 
         del jobs[job]
 
