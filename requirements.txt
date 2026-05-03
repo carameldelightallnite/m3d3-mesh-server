@@ -1,5 +1,8 @@
 flask
-trimesh
+trimesh[all]
 numpy
 scipy
 colladapy
+rtree
+pyrender
+lxml
