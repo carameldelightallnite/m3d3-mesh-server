@@ -1,6 +1,12 @@
 # =========================================================
-# M3D3 PLATINUM SERVER — SL-SAFE COLLADA EXPORT BUILD
-# Fixes MAV_BLOCK_MISSING, blank preview, LOD node mismatch
+# M3D3 PLATINUM SERVER — FINAL SL-SAFE BUILD
+# Fixes:
+# - MAV_BLOCK_MISSING
+# - Blank preview
+# - LOD node mismatch
+# - Bad physics hull density
+# - Degenerate physics triangles
+# - JSON/URL ghost characters
 # =========================================================
 
 import os
@@ -102,6 +108,9 @@ def build_box(size):
 
 def build_cylinder(size):
     base = max(size[0], size[1])
+    if base <= 0.0:
+        base = 1.0
+
     radius = base * 0.5
     height = size[2]
 
@@ -133,6 +142,9 @@ def build_sphere(size):
 
 def build_torus(size):
     base = max(size[0], size[1])
+    if base <= 0.0:
+        base = 1.0
+
     major = base * 0.35
     minor = max(min(size[0], size[1]) * 0.12, size[2] * 0.25, 0.01)
 
@@ -162,6 +174,9 @@ def build_torus(size):
 
 def build_cone(size):
     base = max(size[0], size[1])
+    if base <= 0.0:
+        base = 1.0
+
     radius = base * 0.5
     height = size[2]
 
@@ -203,7 +218,7 @@ def build_prism(size):
         [1, 5, 2],
         [2, 5, 3],
         [2, 3, 0]
-    ])
+    ], dtype=int)
 
     return trimesh.Trimesh(
         vertices=verts,
@@ -222,16 +237,22 @@ def build_mesh_from_prim(prim):
 
     if prim_type == "CYLINDER":
         mesh = build_cylinder(size)
+
     elif prim_type == "SPHERE":
         mesh = build_sphere(size)
+
     elif prim_type in ["TORUS", "RING"]:
         mesh = build_torus(size)
+
     elif prim_type == "PRISM":
         mesh = build_prism(size)
+
     elif prim_type == "CONE":
         mesh = build_cone(size)
+
     elif prim_type == "TUBE":
         mesh = build_cylinder(size)
+
     else:
         mesh = build_box(size)
 
@@ -303,15 +324,62 @@ def make_lods(high):
     medium = decimate_mesh(high, 0.50)
     low = decimate_mesh(high, 0.25)
     lowest = decimate_mesh(high, 0.10)
+
     return high, medium, low, lowest
 
 
 def make_physics(high):
     try:
-        hull = high.convex_hull
-        return decimate_mesh(hull, 0.25)
+        bounds = high.bounds
+        min_corner = bounds[0]
+        max_corner = bounds[1]
+
+        x0, y0, z0 = min_corner
+        x1, y1, z1 = max_corner
+
+        if abs(x1 - x0) < 0.001:
+            x1 = x0 + 0.001
+        if abs(y1 - y0) < 0.001:
+            y1 = y0 + 0.001
+        if abs(z1 - z0) < 0.001:
+            z1 = z0 + 0.001
+
+        verts = np.array([
+            [x0, y0, z0],
+            [x1, y0, z0],
+            [x1, y1, z0],
+            [x0, y1, z0],
+            [x0, y0, z1],
+            [x1, y0, z1],
+            [x1, y1, z1],
+            [x0, y1, z1]
+        ], dtype=float)
+
+        faces = np.array([
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 4, 5],
+            [0, 5, 1],
+            [1, 5, 6],
+            [1, 6, 2],
+            [2, 6, 7],
+            [2, 7, 3],
+            [3, 7, 4],
+            [3, 4, 0]
+        ], dtype=int)
+
+        phys = trimesh.Trimesh(
+            vertices=verts,
+            faces=faces,
+            process=False
+        )
+
+        return clean_mesh(phys)
+
     except Exception:
-        return decimate_mesh(high, 0.10)
+        return clean_mesh(trimesh.creation.box(extents=[1.0, 1.0, 1.0]))
 
 
 # =========================================================
@@ -343,7 +411,6 @@ def write_sl_safe_dae(mesh, path, mesh_name="Object"):
         normals = np.zeros_like(vertices)
         normals[:, 2] = 1.0
 
-    # Required for SL importer stability.
     uvs = np.zeros((len(vertices), 2), dtype=float)
 
     safe_mesh_name = safe_name(mesh_name)
@@ -352,7 +419,6 @@ def write_sl_safe_dae(mesh, path, mesh_name="Object"):
     normal_values = float_list(normals.reshape(-1))
     uv_values = float_list(uvs.reshape(-1))
 
-    # VERTEX / NORMAL / TEXCOORD all share the same index.
     p_values = np.repeat(faces.reshape(-1), 3)
     vcount_values = " ".join(["3"] * len(faces))
 
@@ -603,7 +669,6 @@ def finalize():
             "PHYS": f"{name}_PHYS_{uid}.dae"
         }
 
-        # Critical: every file must share the same internal node name.
         export_mesh(high, files["HIGH"], name)
         export_mesh(medium, files["MEDIUM"], name)
         export_mesh(low, files["LOW"], name)
