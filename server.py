@@ -1,12 +1,12 @@
 # =========================================================
-# M3D3 PLATINUM SERVER — FINAL SL-SAFE BUILD
+# M3D3 PLATINUM SERVER — FINAL PYCOLLADA SL-SAFE BUILD
 # Fixes:
 # - MAV_BLOCK_MISSING
 # - Blank preview
-# - LOD node mismatch
+# - Red-dot preview
+# - Off-origin mesh export
+# - LOD internal node mismatch
 # - Bad physics hull density
-# - Degenerate physics triangles
-# - JSON/URL ghost characters
 # =========================================================
 
 import os
@@ -15,6 +15,7 @@ import uuid
 import traceback
 import numpy as np
 import trimesh
+import collada
 
 from flask import Flask, request, jsonify, send_from_directory
 
@@ -44,17 +45,13 @@ def safe_name(name):
 
 def cleanup_old_files():
     now = time.time()
-
     try:
         for filename in os.listdir(OUTPUT_DIR):
             path = os.path.join(OUTPUT_DIR, filename)
-
             if os.path.isfile(path):
                 age = now - os.path.getmtime(path)
-
                 if age > FILE_TTL_SECONDS:
                     os.remove(path)
-
     except Exception as e:
         print("Cleanup error:", e)
 
@@ -63,12 +60,9 @@ def parse_vec(value, fallback):
     try:
         text = str(value).replace("<", "").replace(">", "").strip()
         arr = np.fromstring(text, sep=",")
-
         if arr.size < len(fallback):
             return np.array(fallback, dtype=float)
-
         return arr.astype(float)
-
     except Exception:
         return np.array(fallback, dtype=float)
 
@@ -76,10 +70,11 @@ def parse_vec(value, fallback):
 def parse_rot(value):
     try:
         q = parse_vec(value, [0.0, 0.0, 0.0, 1.0])
-
         if q.size < 4:
             return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
 
+        # LSL rotation = <x, y, z, s>
+        # trimesh wants = <w, x, y, z>
         return np.array([q[3], q[0], q[1], q[2]], dtype=float)
 
     except Exception:
@@ -220,11 +215,7 @@ def build_prism(size):
         [2, 3, 0]
     ], dtype=int)
 
-    return trimesh.Trimesh(
-        vertices=verts,
-        faces=faces,
-        process=False
-    )
+    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
 
 def build_mesh_from_prim(prim):
@@ -236,27 +227,24 @@ def build_mesh_from_prim(prim):
     prim_type = str(prim.get("type", "BOX")).upper()
 
     if prim_type == "CYLINDER":
-        mesh = build_cylinder(size)
+        return build_cylinder(size)
 
-    elif prim_type == "SPHERE":
-        mesh = build_sphere(size)
+    if prim_type == "SPHERE":
+        return build_sphere(size)
 
-    elif prim_type in ["TORUS", "RING"]:
-        mesh = build_torus(size)
+    if prim_type in ["TORUS", "RING"]:
+        return build_torus(size)
 
-    elif prim_type == "PRISM":
-        mesh = build_prism(size)
+    if prim_type == "PRISM":
+        return build_prism(size)
 
-    elif prim_type == "CONE":
-        mesh = build_cone(size)
+    if prim_type == "CONE":
+        return build_cone(size)
 
-    elif prim_type == "TUBE":
-        mesh = build_cylinder(size)
+    if prim_type == "TUBE":
+        return build_cylinder(size)
 
-    else:
-        mesh = build_box(size)
-
-    return mesh
+    return build_box(size)
 
 
 # =========================================================
@@ -299,7 +287,24 @@ def clean_mesh(mesh):
     except Exception:
         pass
 
+    vertices = np.asarray(mesh.vertices, dtype=float)
+
+    if len(vertices) > 0:
+        vertices = np.nan_to_num(vertices, nan=0.0, posinf=0.0, neginf=0.0)
+        mesh.vertices = vertices
+
     return mesh
+
+
+def center_mesh(mesh):
+    mesh = clean_mesh(mesh)
+
+    bounds = mesh.bounds
+    center = (bounds[0] + bounds[1]) * 0.5
+
+    mesh.apply_translation(-center)
+
+    return clean_mesh(mesh)
 
 
 def decimate_mesh(mesh, ratio):
@@ -307,20 +312,21 @@ def decimate_mesh(mesh, ratio):
 
     try:
         out = mesh.simplify_quadric_decimation(face_count=target_faces)
-        return clean_mesh(out)
+        return center_mesh(out)
     except Exception:
         pass
 
     try:
         out = mesh.simplify_quadratic_decimation(target_faces)
-        return clean_mesh(out)
+        return center_mesh(out)
     except Exception:
         pass
 
-    return clean_mesh(mesh.copy())
+    return center_mesh(mesh.copy())
 
 
 def make_lods(high):
+    high = center_mesh(high)
     medium = decimate_mesh(high, 0.50)
     low = decimate_mesh(high, 0.25)
     lowest = decimate_mesh(high, 0.10)
@@ -370,170 +376,130 @@ def make_physics(high):
             [3, 4, 0]
         ], dtype=int)
 
-        phys = trimesh.Trimesh(
-            vertices=verts,
-            faces=faces,
-            process=False
-        )
-
-        return clean_mesh(phys)
+        phys = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+        return center_mesh(phys)
 
     except Exception:
-        return clean_mesh(trimesh.creation.box(extents=[1.0, 1.0, 1.0]))
+        return center_mesh(trimesh.creation.box(extents=[1.0, 1.0, 1.0]))
 
 
 # =========================================================
-# SECOND LIFE SAFE COLLADA WRITER
+# PYCOLLADA EXPORTER
 # =========================================================
 
-def float_list(values):
-    return " ".join(f"{float(v):.6f}" for v in values)
+def mesh_to_collada(mesh, path, mesh_name):
+    mesh = center_mesh(mesh)
 
-
-def int_list(values):
-    if isinstance(values, np.ndarray):
-        return " ".join(values.astype(str))
-    return " ".join(str(int(v)) for v in values)
-
-
-def write_sl_safe_dae(mesh, path, mesh_name="Object"):
-    mesh = clean_mesh(mesh)
-
-    vertices = np.asarray(mesh.vertices, dtype=float)
-    faces = np.asarray(mesh.faces, dtype=int)
+    vertices = np.asarray(mesh.vertices, dtype=np.float32)
+    faces = np.asarray(mesh.faces, dtype=np.int32)
 
     if len(vertices) == 0 or len(faces) == 0:
         raise RuntimeError("Cannot export empty mesh.")
 
     try:
-        normals = np.asarray(mesh.vertex_normals, dtype=float)
+        normals = np.asarray(mesh.vertex_normals, dtype=np.float32)
     except Exception:
         normals = np.zeros_like(vertices)
         normals[:, 2] = 1.0
 
-    uvs = np.zeros((len(vertices), 2), dtype=float)
+    vertices = np.nan_to_num(vertices, nan=0.0, posinf=0.0, neginf=0.0)
+    normals = np.nan_to_num(normals, nan=0.0, posinf=0.0, neginf=0.0)
 
-    safe_mesh_name = safe_name(mesh_name)
+    normal_lengths = np.linalg.norm(normals, axis=1)
+    normal_lengths[normal_lengths == 0] = 1.0
+    normals = normals / normal_lengths[:, None]
 
-    pos_values = float_list(vertices.reshape(-1))
-    normal_values = float_list(normals.reshape(-1))
-    uv_values = float_list(uvs.reshape(-1))
+    uvs = np.zeros((len(vertices), 2), dtype=np.float32)
 
-    p_values = np.repeat(faces.reshape(-1), 3)
-    vcount_values = " ".join(["3"] * len(faces))
+    name = safe_name(mesh_name)
 
-    dae = f'''<?xml version="1.0" encoding="utf-8"?>
-<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
-  <asset>
-    <contributor>
-      <authoring_tool>M3D3 Platinum SL-Safe Exporter</authoring_tool>
-    </contributor>
-    <created>2026-01-01T00:00:00Z</created>
-    <modified>2026-01-01T00:00:00Z</modified>
-    <unit name="meter" meter="1"/>
-    <up_axis>Z_UP</up_axis>
-  </asset>
+    dae = collada.Collada()
 
-  <library_effects>
-    <effect id="mat_effect">
-      <profile_COMMON>
-        <technique sid="common">
-          <phong>
-            <diffuse>
-              <color>0.8 0.8 0.8 1</color>
-            </diffuse>
-          </phong>
-        </technique>
-      </profile_COMMON>
-    </effect>
-  </library_effects>
+    effect = collada.material.Effect(
+        "MaterialEffect",
+        [],
+        "phong",
+        diffuse=(0.8, 0.8, 0.8, 1.0),
+        specular=(0.0, 0.0, 0.0, 1.0)
+    )
 
-  <library_materials>
-    <material id="mat" name="mat">
-      <instance_effect url="#mat_effect"/>
-    </material>
-  </library_materials>
+    material = collada.material.Material(
+        "Material",
+        "Material",
+        effect
+    )
 
-  <library_geometries>
-    <geometry id="{safe_mesh_name}_geometry" name="{safe_mesh_name}">
-      <mesh>
-        <source id="{safe_mesh_name}_positions">
-          <float_array id="{safe_mesh_name}_positions_array" count="{len(vertices) * 3}">
-            {pos_values}
-          </float_array>
-          <technique_common>
-            <accessor source="#{safe_mesh_name}_positions_array" count="{len(vertices)}" stride="3">
-              <param name="X" type="float"/>
-              <param name="Y" type="float"/>
-              <param name="Z" type="float"/>
-            </accessor>
-          </technique_common>
-        </source>
+    dae.effects.append(effect)
+    dae.materials.append(material)
 
-        <source id="{safe_mesh_name}_normals">
-          <float_array id="{safe_mesh_name}_normals_array" count="{len(normals) * 3}">
-            {normal_values}
-          </float_array>
-          <technique_common>
-            <accessor source="#{safe_mesh_name}_normals_array" count="{len(normals)}" stride="3">
-              <param name="X" type="float"/>
-              <param name="Y" type="float"/>
-              <param name="Z" type="float"/>
-            </accessor>
-          </technique_common>
-        </source>
+    vert_source = collada.source.FloatSource(
+        f"{name}_verts_array",
+        vertices,
+        ("X", "Y", "Z")
+    )
 
-        <source id="{safe_mesh_name}_uvs">
-          <float_array id="{safe_mesh_name}_uvs_array" count="{len(uvs) * 2}">
-            {uv_values}
-          </float_array>
-          <technique_common>
-            <accessor source="#{safe_mesh_name}_uvs_array" count="{len(uvs)}" stride="2">
-              <param name="S" type="float"/>
-              <param name="T" type="float"/>
-            </accessor>
-          </technique_common>
-        </source>
+    normal_source = collada.source.FloatSource(
+        f"{name}_normals_array",
+        normals,
+        ("X", "Y", "Z")
+    )
 
-        <vertices id="{safe_mesh_name}_vertices">
-          <input semantic="POSITION" source="#{safe_mesh_name}_positions"/>
-        </vertices>
+    uv_source = collada.source.FloatSource(
+        f"{name}_uv_array",
+        uvs,
+        ("S", "T")
+    )
 
-        <polylist material="mat" count="{len(faces)}">
-          <input semantic="VERTEX" source="#{safe_mesh_name}_vertices" offset="0"/>
-          <input semantic="NORMAL" source="#{safe_mesh_name}_normals" offset="1"/>
-          <input semantic="TEXCOORD" source="#{safe_mesh_name}_uvs" offset="2" set="0"/>
-          <vcount>{vcount_values}</vcount>
-          <p>{int_list(p_values)}</p>
-        </polylist>
-      </mesh>
-    </geometry>
-  </library_geometries>
+    geom = collada.geometry.Geometry(
+        dae,
+        f"{name}_geometry",
+        name,
+        [vert_source, normal_source, uv_source]
+    )
 
-  <library_visual_scenes>
-    <visual_scene id="Scene" name="Scene">
-      <node id="{safe_mesh_name}_node" name="{safe_mesh_name}" type="NODE">
-        <instance_geometry url="#{safe_mesh_name}_geometry">
-          <bind_material>
-            <technique_common>
-              <instance_material symbol="mat" target="#mat">
-                <bind_vertex_input semantic="TEXCOORD" input_semantic="TEXCOORD" input_set="0"/>
-              </instance_material>
-            </technique_common>
-          </bind_material>
-        </instance_geometry>
-      </node>
-    </visual_scene>
-  </library_visual_scenes>
+    input_list = collada.source.InputList()
+    input_list.addInput(0, "VERTEX", f"#{name}_verts_array")
+    input_list.addInput(1, "NORMAL", f"#{name}_normals_array")
+    input_list.addInput(2, "TEXCOORD", f"#{name}_uv_array", set="0")
 
-  <scene>
-    <instance_visual_scene url="#Scene"/>
-  </scene>
-</COLLADA>
-'''
+    indices = np.repeat(faces.reshape(-1), 3).astype(np.int32)
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(dae)
+    tri_set = geom.createTriangleSet(
+        indices,
+        input_list,
+        "MaterialRef"
+    )
+
+    geom.primitives.append(tri_set)
+    dae.geometries.append(geom)
+
+    mat_node = collada.scene.MaterialNode(
+        "MaterialRef",
+        material,
+        inputs=[
+            ("TEXCOORD", "TEXCOORD", "0")
+        ]
+    )
+
+    geom_node = collada.scene.GeometryNode(
+        geom,
+        [mat_node]
+    )
+
+    node = collada.scene.Node(
+        name,
+        children=[geom_node]
+    )
+
+    scene = collada.scene.Scene(
+        "Scene",
+        [node]
+    )
+
+    dae.scenes.append(scene)
+    dae.scene = scene
+
+    dae.write(path)
 
     if not os.path.exists(path):
         raise RuntimeError("DAE export failed.")
@@ -546,7 +512,7 @@ def write_sl_safe_dae(mesh, path, mesh_name="Object"):
 
 def export_mesh(mesh, filename, mesh_name):
     path = os.path.join(OUTPUT_DIR, filename)
-    write_sl_safe_dae(mesh, path, mesh_name)
+    mesh_to_collada(mesh, path, mesh_name)
     return path
 
 
@@ -563,7 +529,7 @@ def home():
 def health():
     return jsonify({
         "ok": True,
-        "server": "M3D3 Platinum SL-Safe Exporter",
+        "server": "M3D3 Platinum PyCollada Exporter",
         "outputs": os.listdir(OUTPUT_DIR),
         "jobs": list(jobs.keys())
     })
@@ -654,7 +620,7 @@ def finalize():
             return jsonify({"error": "mesh generation failed"}), 500
 
         high = trimesh.util.concatenate(meshes)
-        high = clean_mesh(high)
+        high = center_mesh(high)
 
         high, medium, low, lowest = make_lods(high)
         phys = make_physics(high)
@@ -669,6 +635,7 @@ def finalize():
             "PHYS": f"{name}_PHYS_{uid}.dae"
         }
 
+        # All files use the exact same internal object name.
         export_mesh(high, files["HIGH"], name)
         export_mesh(medium, files["MEDIUM"], name)
         export_mesh(low, files["LOW"], name)
@@ -704,7 +671,6 @@ def download(filename):
         return jsonify({
             "error": "File not found",
             "requested": safe_file,
-            "hint": "Check if the file expired, was deleted, or the link contains extra copied JSON characters.",
             "available": os.listdir(OUTPUT_DIR)
         }), 404
 
@@ -715,10 +681,6 @@ def download(filename):
         mimetype="model/vnd.collada+xml"
     )
 
-
-# =========================================================
-# LOCAL RUN
-# =========================================================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
