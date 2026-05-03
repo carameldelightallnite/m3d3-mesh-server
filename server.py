@@ -1,5 +1,5 @@
 # =========================================================
-# M3D3 PLATINUM SERVER — ROOT FIX + FULL PIPELINE
+# M3D3 PLATINUM SERVER — FINAL (RENDER READY / GUNICORN)
 # =========================================================
 
 import os
@@ -29,8 +29,9 @@ def r(s):
 def box(s): return trimesh.creation.box(extents=s)
 def cyl(s): return trimesh.creation.cylinder(radius=s[0]/2, height=s[2], sections=32)
 def sph(s): return trimesh.creation.uv_sphere(radius=s[0]/2, count=[32,32])
-def tor(s): return trimesh.creation.torus(radius=s[0]/2, tube_radius=s[1]/4)
-def con(s): return trimesh.creation.cone(radius=s[0]/2, height=s[2])
+def tor(s): return trimesh.creation.torus(radius=s[0]/2, tube_radius=s[1]/4, sections=48, segments=24)
+def con(s): return trimesh.creation.cone(radius=s[0]/2, height=s[2], sections=32)
+
 def pri(s):
     b = s[0]/2; h = s[2]
     verts = np.array([
@@ -46,7 +47,7 @@ def pri(s):
     return trimesh.Trimesh(vertices=verts, faces=faces)
 
 # =========================
-# CLEAN
+# CLEAN / OPTIMIZE
 # =========================
 def clean(m):
     m.remove_duplicate_faces()
@@ -55,13 +56,15 @@ def clean(m):
     m.merge_vertices(digits=4)
     m.fill_holes()
     m.fix_normals()
+
     if not m.visual.uv:
         uv = m.vertices[:, :2]
         m.visual = trimesh.visual.TextureVisuals(uv=uv)
+
     return m
 
 # =========================
-# LOD
+# LOD GENERATION
 # =========================
 def lods(m):
     f = len(m.faces)
@@ -73,21 +76,21 @@ def lods(m):
     )
 
 # =========================
-# PHYSICS
+# PHYSICS HULL
 # =========================
 def physics(m):
     h = m.convex_hull
     return clean(h.simplify_quadratic_decimation(int(len(h.faces) * 0.25)))
 
 # =========================
-# ROOT ROUTE (FIXES 404)
+# ROOT ROUTE
 # =========================
 @app.route("/")
 def home():
     return "M3D3 SERVER RUNNING"
 
 # =========================
-# UPLOAD
+# UPLOAD CHUNK
 # =========================
 @app.route("/upload_chunk", methods=["POST"])
 def upload():
@@ -102,7 +105,7 @@ def upload():
     return jsonify({"ok": True})
 
 # =========================
-# FINALIZE
+# FINALIZE BUILD
 # =========================
 @app.route("/finalize", methods=["POST"])
 def finalize():
@@ -115,8 +118,8 @@ def finalize():
 
     for i, p in enumerate(prims):
         size = v(p["size"])
-        pos = v(p["pos"])
-        rot = r(p["rot"])
+        pos  = v(p["pos"])
+        rot  = r(p["rot"])
         t = p["type"]
 
         if t == "BOX": m = box(size)
@@ -144,15 +147,15 @@ def finalize():
     uid = uuid.uuid4().hex
 
     files = {
-        "HIGH": f"{name}_H_{uid}.dae",
-        "MED": f"{name}_M_{uid}.dae",
-        "LOW": f"{name}_L_{uid}.dae",
-        "LOWEST": f"{name}_LO_{uid}.dae",
-        "PHYS": f"{name}_P_{uid}.dae"
+        "HIGH": f"{name}_HIGH_{uid}.dae",
+        "MEDIUM": f"{name}_MEDIUM_{uid}.dae",
+        "LOW": f"{name}_LOW_{uid}.dae",
+        "LOWEST": f"{name}_LOWEST_{uid}.dae",
+        "PHYS": f"{name}_PHYS_{uid}.dae"
     }
 
     H.export(os.path.join(OUTPUT, files["HIGH"]))
-    M.export(os.path.join(OUTPUT, files["MED"]))
+    M.export(os.path.join(OUTPUT, files["MEDIUM"]))
     L.export(os.path.join(OUTPUT, files["LOW"]))
     LO.export(os.path.join(OUTPUT, files["LOWEST"]))
     P.export(os.path.join(OUTPUT, files["PHYS"]))
@@ -171,8 +174,8 @@ def download(filename):
     return send_from_directory(OUTPUT, filename, as_attachment=True)
 
 # =========================
-# RUN
+# LOCAL RUN (SAFE)
 # =========================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
