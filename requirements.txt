@@ -1,3 +1,6 @@
+# =========================================================
+# requirements.txt
+# =========================================================
 flask
 trimesh[all]
 numpy
@@ -6,3 +9,4 @@ colladapy
 rtree
 pyrender
 lxml
+gunicorn
