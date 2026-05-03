@@ -1,6 +1,6 @@
 # =========================================================
-# M3D3 PLATINUM SERVER — FINAL DOWNLOAD FIX
-# Stable downloads + absolute output path + old-file cleanup
+# M3D3 PLATINUM SERVER — FINAL COMMERCIAL BUILD
+# LSL → Python → Trimesh → LOD → Physics → DAE Download
 # =========================================================
 
 import os
@@ -10,9 +10,14 @@ import uuid
 import traceback
 import numpy as np
 import trimesh
+
 from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask(__name__)
+
+# =========================================================
+# GLOBAL STORAGE
+# =========================================================
 
 jobs = {}
 
@@ -30,7 +35,7 @@ FILE_TTL_SECONDS = 1800
 def safe_name(name):
     name = str(name or "M3D3_Export")
     name = name.replace(" ", "_")
-    name = re.sub(r"[^A-Za-z0-9_\-]", "", name)
+    name = "".join(c for c in name if c.isalnum() or c == "_")
     if name == "":
         name = "M3D3_Export"
     return name
@@ -38,13 +43,17 @@ def safe_name(name):
 
 def cleanup_old_files():
     now = time.time()
+
     try:
         for filename in os.listdir(OUTPUT_DIR):
             path = os.path.join(OUTPUT_DIR, filename)
+
             if os.path.isfile(path):
                 age = now - os.path.getmtime(path)
+
                 if age > FILE_TTL_SECONDS:
                     os.remove(path)
+
     except Exception as e:
         print("Cleanup error:", e)
 
@@ -53,9 +62,12 @@ def parse_vec(value, fallback):
     try:
         text = str(value).replace("<", "").replace(">", "").strip()
         arr = np.fromstring(text, sep=",")
+
         if arr.size < len(fallback):
             return np.array(fallback, dtype=float)
+
         return arr.astype(float)
+
     except Exception:
         return np.array(fallback, dtype=float)
 
@@ -63,19 +75,25 @@ def parse_vec(value, fallback):
 def parse_rot(value):
     try:
         q = parse_vec(value, [0.0, 0.0, 0.0, 1.0])
+
         if q.size < 4:
             return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+
         return np.array([q[3], q[0], q[1], q[2]], dtype=float)
+
     except Exception:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
 
 
 def safe_size(size):
     s = np.array(size, dtype=float)
+
     if s.size < 3:
         s = np.array([1.0, 1.0, 1.0], dtype=float)
+
     s = np.abs(s)
     s[s < 0.001] = 0.001
+
     return s
 
 
@@ -88,32 +106,82 @@ def build_box(size):
 
 
 def build_cylinder(size):
-    radius = max(size[0], size[1]) * 0.5
+    base = max(size[0], size[1])
+    radius = base * 0.5
     height = size[2]
-    mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=32)
-    mesh.apply_scale([size[0] / max(size[0], size[1]), size[1] / max(size[0], size[1]), 1.0])
+
+    mesh = trimesh.creation.cylinder(
+        radius=radius,
+        height=height,
+        sections=32
+    )
+
+    mesh.apply_scale([
+        size[0] / base,
+        size[1] / base,
+        1.0
+    ])
+
     return mesh
 
 
 def build_sphere(size):
-    mesh = trimesh.creation.uv_sphere(radius=0.5, count=[32, 32])
+    mesh = trimesh.creation.uv_sphere(
+        radius=0.5,
+        count=[32, 32]
+    )
+
     mesh.apply_scale(size)
+
     return mesh
 
 
 def build_torus(size):
-    major = max(size[0], size[1]) * 0.35
+    base = max(size[0], size[1])
+    major = base * 0.35
     minor = max(min(size[0], size[1]) * 0.12, size[2] * 0.25, 0.01)
-    mesh = trimesh.creation.torus(major_radius=major, minor_radius=minor, major_sections=48, minor_sections=16)
-    mesh.apply_scale([size[0] / max(size[0], size[1]), size[1] / max(size[0], size[1]), 1.0])
+
+    try:
+        mesh = trimesh.creation.torus(
+            major_radius=major,
+            minor_radius=minor,
+            major_sections=48,
+            minor_sections=16
+        )
+    except TypeError:
+        mesh = trimesh.creation.torus(
+            radius=major,
+            tube_radius=minor,
+            sections=48,
+            segments=16
+        )
+
+    mesh.apply_scale([
+        size[0] / base,
+        size[1] / base,
+        1.0
+    ])
+
     return mesh
 
 
 def build_cone(size):
-    radius = max(size[0], size[1]) * 0.5
+    base = max(size[0], size[1])
+    radius = base * 0.5
     height = size[2]
-    mesh = trimesh.creation.cone(radius=radius, height=height, sections=32)
-    mesh.apply_scale([size[0] / max(size[0], size[1]), size[1] / max(size[0], size[1]), 1.0])
+
+    mesh = trimesh.creation.cone(
+        radius=radius,
+        height=height,
+        sections=32
+    )
+
+    mesh.apply_scale([
+        size[0] / base,
+        size[1] / base,
+        1.0
+    ])
+
     return mesh
 
 
@@ -142,23 +210,42 @@ def build_prism(size):
         [2, 3, 0]
     ])
 
-    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    return trimesh.Trimesh(
+        vertices=verts,
+        faces=faces,
+        process=False
+    )
 
 
 def build_mesh_from_prim(prim):
-    size = safe_size(parse_vec(prim.get("size", "<1,1,1>"), [1.0, 1.0, 1.0]))
+    size = safe_size(parse_vec(
+        prim.get("size", "<1,1,1>"),
+        [1.0, 1.0, 1.0]
+    ))
+
     prim_type = str(prim.get("type", "BOX")).upper()
 
     if prim_type == "CYLINDER":
         mesh = build_cylinder(size)
+
     elif prim_type == "SPHERE":
         mesh = build_sphere(size)
+
     elif prim_type == "TORUS":
         mesh = build_torus(size)
+
     elif prim_type == "PRISM":
         mesh = build_prism(size)
+
     elif prim_type == "CONE":
         mesh = build_cone(size)
+
+    elif prim_type == "TUBE":
+        mesh = build_cylinder(size)
+
+    elif prim_type == "RING":
+        mesh = build_torus(size)
+
     else:
         mesh = build_box(size)
 
@@ -170,6 +257,11 @@ def build_mesh_from_prim(prim):
 # =========================================================
 
 def clean_mesh(mesh):
+    try:
+        mesh.remove_infinite_values()
+    except Exception:
+        pass
+
     try:
         mesh.remove_duplicate_faces()
     except Exception:
@@ -232,6 +324,7 @@ def make_lods(high):
     medium = decimate_mesh(high, 0.50)
     low = decimate_mesh(high, 0.25)
     lowest = decimate_mesh(high, 0.10)
+
     return high, medium, low, lowest
 
 
@@ -245,11 +338,15 @@ def make_physics(high):
 
 def export_mesh(mesh, filename):
     path = os.path.join(OUTPUT_DIR, filename)
+
     mesh.export(path)
+
     if not os.path.exists(path):
         raise RuntimeError("Export failed: " + filename)
+
     if os.path.getsize(path) <= 0:
         raise RuntimeError("Export created empty file: " + filename)
+
     return path
 
 
@@ -267,7 +364,8 @@ def health():
     return jsonify({
         "ok": True,
         "server": "M3D3 Platinum",
-        "outputs": os.listdir(OUTPUT_DIR)
+        "outputs": os.listdir(OUTPUT_DIR),
+        "jobs": list(jobs.keys())
     })
 
 
@@ -275,6 +373,7 @@ def health():
 def upload_chunk():
     try:
         data = request.get_json(force=True)
+
         job = str(data.get("job", "")).strip()
         chunk = data.get("chunk", [])
 
@@ -307,6 +406,7 @@ def finalize():
         cleanup_old_files()
 
         data = request.get_json(force=True)
+
         job = str(data.get("job", "")).strip()
         name = safe_name(data.get("name", "Object"))
 
@@ -331,8 +431,14 @@ def finalize():
             try:
                 mesh = build_mesh_from_prim(prim)
 
-                pos = parse_vec(prim.get("pos", "<0,0,0>"), [0.0, 0.0, 0.0])
-                rot = parse_rot(prim.get("rot", "<0,0,0,1>"))
+                pos = parse_vec(
+                    prim.get("pos", "<0,0,0>"),
+                    [0.0, 0.0, 0.0]
+                )
+
+                rot = parse_rot(
+                    prim.get("rot", "<0,0,0,1>")
+                )
 
                 transform = trimesh.transformations.quaternion_matrix(rot)
                 transform[:3, 3] = pos
@@ -345,7 +451,10 @@ def finalize():
                     255
                 ], dtype=np.uint8)
 
-                mesh.visual.face_colors = np.tile(color, (len(mesh.faces), 1))
+                mesh.visual.face_colors = np.tile(
+                    color,
+                    (len(mesh.faces), 1)
+                )
 
                 meshes.append(clean_mesh(mesh))
 
@@ -392,13 +501,22 @@ def finalize():
 
 @app.route("/download/<path:filename>", methods=["GET"])
 def download(filename):
-    safe_file = os.path.basename(filename)
-    path = os.path.join(OUTPUT_DIR, safe_file)
+    safe_file = (
+        os.path.basename(filename)
+        .replace('"', "")
+        .replace("\\", "")
+        .replace("}", "")
+        .replace("{", "")
+        .strip()
+    )
 
-    if not os.path.exists(path):
+    file_path = os.path.join(OUTPUT_DIR, safe_file)
+
+    if not os.path.exists(file_path):
         return jsonify({
-            "error": "file not found",
+            "error": "File not found",
             "requested": safe_file,
+            "hint": "Check if the file expired, was deleted, or the link contains extra copied JSON characters.",
             "available": os.listdir(OUTPUT_DIR)
         }), 404
 
