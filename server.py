@@ -1,14 +1,12 @@
 # =========================================================
 # M3D3 PLATINUM SERVER — SL-SAFE COLLADA EXPORT BUILD
-# Fixes blank preview + MAV upload errors
+# Fixes MAV_BLOCK_MISSING, blank preview, LOD node mismatch
 # =========================================================
 
 import os
-import re
 import time
 import uuid
 import traceback
-import html
 import numpy as np
 import trimesh
 
@@ -224,25 +222,16 @@ def build_mesh_from_prim(prim):
 
     if prim_type == "CYLINDER":
         mesh = build_cylinder(size)
-
     elif prim_type == "SPHERE":
         mesh = build_sphere(size)
-
-    elif prim_type == "TORUS":
+    elif prim_type in ["TORUS", "RING"]:
         mesh = build_torus(size)
-
     elif prim_type == "PRISM":
         mesh = build_prism(size)
-
     elif prim_type == "CONE":
         mesh = build_cone(size)
-
     elif prim_type == "TUBE":
         mesh = build_cylinder(size)
-
-    elif prim_type == "RING":
-        mesh = build_torus(size)
-
     else:
         mesh = build_box(size)
 
@@ -314,7 +303,6 @@ def make_lods(high):
     medium = decimate_mesh(high, 0.50)
     low = decimate_mesh(high, 0.25)
     lowest = decimate_mesh(high, 0.10)
-
     return high, medium, low, lowest
 
 
@@ -335,10 +323,12 @@ def float_list(values):
 
 
 def int_list(values):
+    if isinstance(values, np.ndarray):
+        return " ".join(values.astype(str))
     return " ".join(str(int(v)) for v in values)
 
 
-def write_sl_safe_dae(mesh, path, mesh_name="M3D3Mesh"):
+def write_sl_safe_dae(mesh, path, mesh_name="Object"):
     mesh = clean_mesh(mesh)
 
     vertices = np.asarray(mesh.vertices, dtype=float)
@@ -353,16 +343,18 @@ def write_sl_safe_dae(mesh, path, mesh_name="M3D3Mesh"):
         normals = np.zeros_like(vertices)
         normals[:, 2] = 1.0
 
+    # Required for SL importer stability.
+    uvs = np.zeros((len(vertices), 2), dtype=float)
+
     safe_mesh_name = safe_name(mesh_name)
 
     pos_values = float_list(vertices.reshape(-1))
     normal_values = float_list(normals.reshape(-1))
+    uv_values = float_list(uvs.reshape(-1))
 
-    p_values = []
-    for face in faces:
-        for idx in face:
-            p_values.append(idx)
-            p_values.append(idx)
+    # VERTEX / NORMAL / TEXCOORD all share the same index.
+    p_values = np.repeat(faces.reshape(-1), 3)
+    vcount_values = " ".join(["3"] * len(faces))
 
     dae = f'''<?xml version="1.0" encoding="utf-8"?>
 <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
@@ -425,26 +417,42 @@ def write_sl_safe_dae(mesh, path, mesh_name="M3D3Mesh"):
           </technique_common>
         </source>
 
+        <source id="{safe_mesh_name}_uvs">
+          <float_array id="{safe_mesh_name}_uvs_array" count="{len(uvs) * 2}">
+            {uv_values}
+          </float_array>
+          <technique_common>
+            <accessor source="#{safe_mesh_name}_uvs_array" count="{len(uvs)}" stride="2">
+              <param name="S" type="float"/>
+              <param name="T" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+
         <vertices id="{safe_mesh_name}_vertices">
           <input semantic="POSITION" source="#{safe_mesh_name}_positions"/>
         </vertices>
 
-        <triangles material="mat" count="{len(faces)}">
+        <polylist material="mat" count="{len(faces)}">
           <input semantic="VERTEX" source="#{safe_mesh_name}_vertices" offset="0"/>
           <input semantic="NORMAL" source="#{safe_mesh_name}_normals" offset="1"/>
+          <input semantic="TEXCOORD" source="#{safe_mesh_name}_uvs" offset="2" set="0"/>
+          <vcount>{vcount_values}</vcount>
           <p>{int_list(p_values)}</p>
-        </triangles>
+        </polylist>
       </mesh>
     </geometry>
   </library_geometries>
 
   <library_visual_scenes>
     <visual_scene id="Scene" name="Scene">
-      <node id="{safe_mesh_name}_node" name="{safe_mesh_name}">
+      <node id="{safe_mesh_name}_node" name="{safe_mesh_name}" type="NODE">
         <instance_geometry url="#{safe_mesh_name}_geometry">
           <bind_material>
             <technique_common>
-              <instance_material symbol="mat" target="#mat"/>
+              <instance_material symbol="mat" target="#mat">
+                <bind_vertex_input semantic="TEXCOORD" input_semantic="TEXCOORD" input_set="0"/>
+              </instance_material>
             </technique_common>
           </bind_material>
         </instance_geometry>
@@ -595,11 +603,12 @@ def finalize():
             "PHYS": f"{name}_PHYS_{uid}.dae"
         }
 
-        export_mesh(high, files["HIGH"], f"{name}_HIGH")
-        export_mesh(medium, files["MEDIUM"], f"{name}_MEDIUM")
-        export_mesh(low, files["LOW"], f"{name}_LOW")
-        export_mesh(lowest, files["LOWEST"], f"{name}_LOWEST")
-        export_mesh(phys, files["PHYS"], f"{name}_PHYS")
+        # Critical: every file must share the same internal node name.
+        export_mesh(high, files["HIGH"], name)
+        export_mesh(medium, files["MEDIUM"], name)
+        export_mesh(low, files["LOW"], name)
+        export_mesh(lowest, files["LOWEST"], name)
+        export_mesh(phys, files["PHYS"], name)
 
         del jobs[job]
 
