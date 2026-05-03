@@ -1,8 +1,8 @@
 flask
-trimesh[all]
 numpy<2.0.0
+trimesh
 scipy
 rtree
-pycollada
 fast-simplification
+pycollada
 gunicorn
