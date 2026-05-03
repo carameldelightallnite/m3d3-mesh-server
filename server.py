@@ -1,5 +1,5 @@
 # =========================================================
-# M3D3 SERVER — FULL FINAL (RENDER READY + ZIP DELIVERY)
+# M3D3 SERVER — FULL FINAL (RENDER READY + HTTPS FIX)
 # =========================================================
 
 import os
@@ -152,9 +152,8 @@ def generate():
 
     generate_pack(p, job_id)
 
-    base_url = request.host_url.rstrip("/")
-
-    url = f"{base_url}/download/{job_id}/mesh_pack.zip"
+    # 🔥 FORCE HTTPS FIX (CRITICAL)
+    url = f"https://{request.host}/download/{job_id}/mesh_pack.zip"
 
     return jsonify({"url": url})
 
