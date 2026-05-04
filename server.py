@@ -1,25 +1,20 @@
 # =========================================================
 # M3D3 PRIM TO MESH SERVER
-# NN-STYLE MULTI-GEOMETRY Z_UP EXPORTER
+# NN-STYLE MULTI-GEOMETRY Z_UP LOW-LI UPLOAD BASE
 #
 # Version:
-# M3D3_NN_STYLE_MULTI_GEOMETRY_ZUP_VERIFIED_2026_05_04
+# M3D3_NN_STYLE_LOW_LI_UPLOAD_BASE_2026_05_04
 #
 # Purpose:
-# - Receives scripted build prim reports from Second Life.
-# - Excludes generator panel geometry.
-# - Creates one job page.
-# - Default SL Ready DAE uses multi-geometry PRIM_0000 / PRIM_0001 blocks.
-# - Default DAE is controlled-density and Z_UP.
-# - Preview GLB can be higher quality.
-# - Provides DAE, GLB, STL, ZIP, and Advanced ZIP.
+# - Preserve the working generator -> receiver -> server -> job page pipeline.
+# - Preserve NN-style multi-geometry PRIM_0000 / PRIM_0001 DAE output.
+# - Keep the job page and preview workflow.
+# - Reduce default SL Ready DAE density for lower Land Impact.
+# - Keep preview GLB higher quality than upload DAE.
 #
-# Verified from current user evidence:
-# - Generator/receiver/server one-link flow reached working job page.
-# - Sphere receiver reported correctly.
-#
-# Not yet verified by direct execution in this response:
-# - Final multi-geometry DAE upload in SL viewer.
+# Current working base:
+# - Sphere uploads successfully to Second Life.
+# - Remaining target: lower default LI toward 0.5-1 where possible.
 # =========================================================
 
 import os
@@ -36,7 +31,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
 
-VERSION = "M3D3_NN_STYLE_MULTI_GEOMETRY_ZUP_VERIFIED_2026_05_04"
+VERSION = "M3D3_NN_STYLE_LOW_LI_UPLOAD_BASE_2026_05_04"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
@@ -51,20 +46,26 @@ JOB_TTL_SECONDS = 1800
 MIN_AXIS_SIZE = 0.001
 MAX_SL_SIZE = 64.0
 
-DEFAULT_QUALITY = 20
+DEFAULT_QUALITY = 16
 MIN_QUALITY = 4
 MAX_QUALITY = 24
 
-UPLOAD_SPHERE_LAT = 10
-UPLOAD_SPHERE_LON = 20
+UPLOAD_SPHERE_LON = 12
+UPLOAD_SPHERE_LAT = 8
 
-PREVIEW_SPHERE_LAT = 20
 PREVIEW_SPHERE_LON = 40
+PREVIEW_SPHERE_LAT = 20
 
+UPLOAD_CYLINDER_SECTIONS = 12
+UPLOAD_CONE_SECTIONS = 12
+UPLOAD_TORUS_MAJOR = 16
+UPLOAD_TORUS_MINOR = 6
 
-# =========================================================
-# GENERAL HELPERS
-# =========================================================
+PREVIEW_CYLINDER_SECTIONS = 40
+PREVIEW_CONE_SECTIONS = 40
+PREVIEW_TORUS_MAJOR = 40
+PREVIEW_TORUS_MINOR = 12
+
 
 def now_ts() -> float:
     return time.time()
@@ -91,6 +92,7 @@ def clean_filename(filename: str) -> str:
 
 def cleanup_old_files() -> None:
     cutoff = now_ts() - FILE_TTL_SECONDS
+
     try:
         for filename in os.listdir(OUTPUT_DIR):
             path = os.path.join(OUTPUT_DIR, filename)
@@ -130,8 +132,10 @@ def parse_rot(value: Any) -> np.ndarray:
     try:
         text = str(value).replace("<", "").replace(">", "").strip()
         q = np.fromstring(text, sep=",")
+
         if q.size < 4:
             return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+
         q = q[:4].astype(float)
         q = np.nan_to_num(q, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -162,6 +166,7 @@ def clamp_quality(value: Any) -> int:
 
     if q < MIN_QUALITY:
         q = MIN_QUALITY
+
     if q > MAX_QUALITY:
         q = MAX_QUALITY
 
@@ -172,23 +177,15 @@ def normalize_vector(v: np.ndarray, fallback: np.ndarray) -> np.ndarray:
     try:
         v = np.asarray(v, dtype=float)
         v = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+
         length = np.linalg.norm(v)
+
         if not np.isfinite(length) or length <= 0.000001:
             return fallback
+
         return v / length
     except Exception:
         return fallback
-
-
-def mesh_bounds_and_dims(meshes: List[trimesh.Trimesh]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    merged = trimesh.util.concatenate(meshes)
-    bounds = np.asarray(merged.bounds, dtype=float)
-    min_corner = bounds[0]
-    max_corner = bounds[1]
-    center = (min_corner + max_corner) * 0.5
-    dims = max_corner - min_corner
-    dims = np.nan_to_num(dims, nan=0.0, posinf=0.0, neginf=0.0)
-    return min_corner, max_corner, center, dims
 
 
 def clean_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
@@ -232,14 +229,19 @@ def is_generator_panel_prim(prim: Dict[str, Any]) -> bool:
 
     if role == "GENERATOR":
         return True
+
     if source == "GENERATOR":
         return True
+
     if "generator" in name:
         return True
+
     if "gene_ato" in name:
         return True
+
     if "push" in name:
         return True
+
     if "panel" in name:
         return True
 
@@ -248,46 +250,60 @@ def is_generator_panel_prim(prim: Dict[str, Any]) -> bool:
 
 def shape_from_prim(prim: Dict[str, Any]) -> str:
     name = str(prim.get("name", "")).lower()
-    t = str(prim.get("type", "BOX")).upper()
+    prim_type = str(prim.get("type", "BOX")).upper()
 
     if "sphere" in name:
         return "SPHERE"
+
     if "cylinder" in name:
         return "CYLINDER"
+
     if "torus" in name:
         return "TORUS"
+
     if "ring" in name:
         return "RING"
+
     if "tube" in name:
         return "TUBE"
+
     if "prism" in name:
         return "PRISM"
+
     if "cone" in name:
         return "CONE"
+
     if "box" in name:
         return "BOX"
 
-    if t in ["BOX", "CYLINDER", "SPHERE", "TORUS", "RING", "TUBE", "PRISM", "CONE"]:
-        return t
+    if prim_type in ["BOX", "CYLINDER", "SPHERE", "TORUS", "RING", "TUBE", "PRISM", "CONE"]:
+        return prim_type
 
     return "BOX"
 
 
-# =========================================================
-# PRIMITIVE GEOMETRY
-# =========================================================
+def mesh_bounds_and_dims(meshes: List[trimesh.Trimesh]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    merged = trimesh.util.concatenate(meshes)
+    bounds = np.asarray(merged.bounds, dtype=float)
+    min_corner = bounds[0]
+    max_corner = bounds[1]
+    center = (min_corner + max_corner) * 0.5
+    dims = max_corner - min_corner
+    dims = np.nan_to_num(dims, nan=0.0, posinf=0.0, neginf=0.0)
+    return min_corner, max_corner, center, dims
+
 
 def make_box_mesh() -> trimesh.Trimesh:
     return clean_mesh(trimesh.creation.box(extents=[1.0, 1.0, 1.0]))
 
 
 def make_cylinder_mesh(sections: int) -> trimesh.Trimesh:
-    sections = max(8, int(sections))
+    sections = max(6, int(sections))
     return clean_mesh(trimesh.creation.cylinder(radius=0.5, height=1.0, sections=sections))
 
 
 def make_cone_mesh(sections: int) -> trimesh.Trimesh:
-    sections = max(8, int(sections))
+    sections = max(6, int(sections))
     return clean_mesh(trimesh.creation.cone(radius=0.5, height=1.0, sections=sections))
 
 
@@ -299,7 +315,7 @@ def make_sphere_mesh(lon: int, lat: int) -> trimesh.Trimesh:
 
 def make_torus_mesh(major_sections: int, minor_sections: int) -> trimesh.Trimesh:
     major_sections = max(12, int(major_sections))
-    minor_sections = max(6, int(minor_sections))
+    minor_sections = max(4, int(minor_sections))
 
     try:
         mesh = trimesh.creation.torus(
@@ -326,7 +342,7 @@ def make_prism_mesh() -> trimesh.Trimesh:
         [ 0.0,  0.5, -0.5],
         [-0.5, -0.5,  0.5],
         [ 0.5, -0.5,  0.5],
-        [ 0.0,  0.5,  0.5],
+        [ 0.0,  0.5,  0.5]
     ], dtype=float)
 
     faces = np.array([
@@ -337,7 +353,7 @@ def make_prism_mesh() -> trimesh.Trimesh:
         [1, 4, 5],
         [1, 5, 2],
         [2, 5, 3],
-        [2, 3, 0],
+        [2, 3, 0]
     ], dtype=int)
 
     return clean_mesh(trimesh.Trimesh(vertices=verts, faces=faces, process=False))
@@ -347,30 +363,39 @@ def build_base_mesh(shape: str, mode: str, quality: int) -> trimesh.Trimesh:
     if mode == "preview":
         sphere_lon = max(PREVIEW_SPHERE_LON, quality * 2)
         sphere_lat = max(PREVIEW_SPHERE_LAT, quality)
-        cyl_sections = max(32, quality * 2)
-        torus_major = max(32, quality * 2)
-        torus_minor = max(10, quality // 2)
+        cylinder_sections = max(PREVIEW_CYLINDER_SECTIONS, quality * 2)
+        cone_sections = max(PREVIEW_CONE_SECTIONS, quality * 2)
+        torus_major = max(PREVIEW_TORUS_MAJOR, quality * 2)
+        torus_minor = max(PREVIEW_TORUS_MINOR, quality // 2)
+    elif mode == "ultra":
+        sphere_lon = 10
+        sphere_lat = 6
+        cylinder_sections = 8
+        cone_sections = 8
+        torus_major = 12
+        torus_minor = 4
     else:
         sphere_lon = UPLOAD_SPHERE_LON
         sphere_lat = UPLOAD_SPHERE_LAT
-        cyl_sections = 20
-        torus_major = 24
-        torus_minor = 8
+        cylinder_sections = UPLOAD_CYLINDER_SECTIONS
+        cone_sections = UPLOAD_CONE_SECTIONS
+        torus_major = UPLOAD_TORUS_MAJOR
+        torus_minor = UPLOAD_TORUS_MINOR
 
     if shape == "SPHERE":
         return make_sphere_mesh(sphere_lon, sphere_lat)
 
     if shape == "CYLINDER":
-        return make_cylinder_mesh(cyl_sections)
+        return make_cylinder_mesh(cylinder_sections)
 
     if shape == "CONE":
-        return make_cone_mesh(cyl_sections)
+        return make_cone_mesh(cone_sections)
 
     if shape in ["TORUS", "RING"]:
         return make_torus_mesh(torus_major, torus_minor)
 
     if shape == "TUBE":
-        return make_cylinder_mesh(cyl_sections)
+        return make_cylinder_mesh(cylinder_sections)
 
     if shape == "PRISM":
         return make_prism_mesh()
@@ -389,7 +414,11 @@ def apply_prim_transform(mesh: trimesh.Trimesh, prim: Dict[str, Any]) -> trimesh
 
     if shape in ["TORUS", "RING"]:
         base_xy = max(float(size[0]), float(size[1]), MIN_AXIS_SIZE)
-        mesh.apply_scale([size[0] / base_xy, size[1] / base_xy, max(size[2], MIN_AXIS_SIZE)])
+        mesh.apply_scale([
+            size[0] / base_xy,
+            size[1] / base_xy,
+            max(size[2], MIN_AXIS_SIZE)
+        ])
     else:
         mesh.apply_scale(size)
 
@@ -453,10 +482,6 @@ def build_mesh_records(prims: List[Dict[str, Any]], mode: str, quality: int) -> 
     return records, merged, report
 
 
-# =========================================================
-# COLLADA WRITER
-# =========================================================
-
 def xml_float_list(values: List[float]) -> str:
     return " ".join(f"{float(v):.6f}" for v in values)
 
@@ -474,6 +499,7 @@ def projected_uv(vertex: np.ndarray, min_corner: np.ndarray, dims: np.ndarray) -
 
     if not np.isfinite(u):
         u = 0.0
+
     if not np.isfinite(v):
         v = 0.0
 
@@ -541,13 +567,13 @@ def geometry_xml(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         fallback = fallback_face_normal(a, b, c)
 
         for idx in [i0, i1, i2]:
-            v = vertices[idx]
-            n = normalize_vector(vertex_normals[idx], fallback)
-            u, vv = projected_uv(v, min_corner, dims)
+            vertex = vertices[idx]
+            normal = normalize_vector(vertex_normals[idx], fallback)
+            u, v = projected_uv(vertex, min_corner, dims)
 
-            positions.extend([float(v[0]), float(v[1]), float(v[2])])
-            normals.extend([float(n[0]), float(n[1]), float(n[2])])
-            uvs.extend([float(u), float(vv)])
+            positions.extend([float(vertex[0]), float(vertex[1]), float(vertex[2])])
+            normals.extend([float(normal[0]), float(normal[1]), float(normal[2])])
+            uvs.extend([float(u), float(v)])
 
         tri_count += 1
 
@@ -684,7 +710,7 @@ def write_multi_geometry_dae(records: List[Dict[str, Any]], filepath: str, title
   </library_geometries>
 
   <library_visual_scenes>
-    <visual_scene id="Scene" name="{title}">
+    <visual_scene id="Scene" name="Scene">
 {''.join(node_blocks)}
     </visual_scene>
   </library_visual_scenes>
@@ -730,9 +756,35 @@ def write_preview_files(merged: trimesh.Trimesh, glb_path: str, stl_path: str) -
     }
 
 
+def build_box_proxy_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    proxy_records: List[Dict[str, Any]] = []
+
+    for i, record in enumerate(records):
+        mesh = record["mesh"]
+        bounds = np.asarray(mesh.bounds, dtype=float)
+        dims = bounds[1] - bounds[0]
+        center = (bounds[0] + bounds[1]) * 0.5
+
+        dims = np.abs(dims)
+        dims[dims < MIN_AXIS_SIZE] = MIN_AXIS_SIZE
+
+        proxy = trimesh.creation.box(extents=dims)
+        proxy.apply_translation(center)
+
+        proxy_records.append({
+            "id": f"PRIM_{i:04d}",
+            "name": record.get("name", f"PRIM_{i:04d}"),
+            "shape": "BOX_PROXY",
+            "mesh": clean_mesh(proxy)
+        })
+
+    return proxy_records
+
+
 def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dict[str, Any]:
     upload_records, upload_merged, upload_report = build_mesh_records(prims, "upload", quality)
     preview_records, preview_merged, preview_report = build_mesh_records(prims, "preview", quality)
+    ultra_records, ultra_merged, ultra_report = build_mesh_records(prims, "ultra", quality)
 
     uid = uuid.uuid4().hex[:8]
     package_id = uid
@@ -756,20 +808,20 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
     zip_path = os.path.join(OUTPUT_DIR, files["ZIP"])
     advanced_zip_path = os.path.join(OUTPUT_DIR, files["ADVANCED_ZIP"])
 
-    dae_meta = write_multi_geometry_dae(upload_records, dae_path, name)
-    preview_meta = write_preview_files(preview_merged, glb_path, stl_path)
-
     high_path = os.path.join(OUTPUT_DIR, files["HIGH"])
     medium_path = os.path.join(OUTPUT_DIR, files["MEDIUM"])
     low_path = os.path.join(OUTPUT_DIR, files["LOW"])
     lowest_path = os.path.join(OUTPUT_DIR, files["LOWEST"])
     phys_path = os.path.join(OUTPUT_DIR, files["PHYS"])
 
+    dae_meta = write_multi_geometry_dae(upload_records, dae_path, name)
+    preview_meta = write_preview_files(preview_merged, glb_path, stl_path)
+
     write_multi_geometry_dae(preview_records, high_path, name + "_HIGH")
     write_multi_geometry_dae(upload_records, medium_path, name + "_MEDIUM")
-    write_multi_geometry_dae(upload_records, low_path, name + "_LOW")
-    write_multi_geometry_dae(upload_records, lowest_path, name + "_LOWEST")
-    write_multi_geometry_dae(upload_records, phys_path, name + "_PHYS")
+    write_multi_geometry_dae(ultra_records, low_path, name + "_LOW")
+    write_multi_geometry_dae(build_box_proxy_records(ultra_records), lowest_path, name + "_LOWEST")
+    write_multi_geometry_dae(build_box_proxy_records(ultra_records), phys_path, name + "_PHYS")
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(dae_path, "SL_Ready.dae")
@@ -792,6 +844,7 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
             "version": VERSION,
             "upload": upload_report,
             "preview": preview_report,
+            "ultra": ultra_report,
             "dae": dae_meta,
             "preview_files": preview_meta
         }
@@ -805,10 +858,10 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
 def package_urls(package: Dict[str, Any]) -> Dict[str, str]:
     host = request.host_url.rstrip("/")
     files = package["files"]
-    pid = package["id"]
+    package_id = package["id"]
 
     return {
-        "JOB_PAGE": f"{host}/job/{pid}",
+        "JOB_PAGE": f"{host}/job/{package_id}",
         "DAE": f"{host}/download/{files['DAE']}",
         "GLB": f"{host}/download/{files['GLB']}",
         "STL": f"{host}/download/{files['STL']}",
@@ -821,10 +874,6 @@ def package_urls(package: Dict[str, Any]) -> Dict[str, str]:
         "PHYS": f"{host}/download/{files['PHYS']}"
     }
 
-
-# =========================================================
-# ROUTES
-# =========================================================
 
 @app.route("/", methods=["GET"])
 def home():
@@ -839,7 +888,7 @@ def health():
     return jsonify({
         "ok": True,
         "version": VERSION,
-        "server": "M3D3 NN Style Multi Geometry Z_UP Exporter",
+        "server": "M3D3 NN Style Low LI Upload Base",
         "active_jobs": list(jobs.keys()),
         "result_jobs": list(results.keys()),
         "outputs": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
@@ -855,10 +904,18 @@ def upload_chunk():
         chunk = data.get("chunk", [])
 
         if job == "":
-            return jsonify({"ok": False, "error": "missing job", "version": VERSION}), 400
+            return jsonify({
+                "ok": False,
+                "error": "missing job",
+                "version": VERSION
+            }), 400
 
         if not isinstance(chunk, list):
-            return jsonify({"ok": False, "error": "chunk must be list", "version": VERSION}), 400
+            return jsonify({
+                "ok": False,
+                "error": "chunk must be list",
+                "version": VERSION
+            }), 400
 
         if job not in jobs:
             jobs[job] = {
@@ -867,6 +924,7 @@ def upload_chunk():
             }
 
         clean_chunk = []
+
         for item in chunk:
             if isinstance(item, dict):
                 clean_chunk.append(item)
@@ -883,7 +941,11 @@ def upload_chunk():
 
     except Exception as exc:
         traceback.print_exc()
-        return jsonify({"ok": False, "error": str(exc), "version": VERSION}), 500
+        return jsonify({
+            "ok": False,
+            "error": str(exc),
+            "version": VERSION
+        }), 500
 
 
 @app.route("/finalize", methods=["POST"])
@@ -899,7 +961,11 @@ def finalize():
         quality = clamp_quality(data.get("quality", DEFAULT_QUALITY))
 
         if job == "":
-            return jsonify({"ok": False, "error": "missing job", "version": VERSION}), 400
+            return jsonify({
+                "ok": False,
+                "error": "missing job",
+                "version": VERSION
+            }), 400
 
         if job not in jobs:
             return jsonify({
@@ -913,7 +979,11 @@ def finalize():
         prims = jobs[job]["chunks"]
 
         if not prims:
-            return jsonify({"ok": False, "error": "job has no prim data", "version": VERSION}), 400
+            return jsonify({
+                "ok": False,
+                "error": "job has no prim data",
+                "version": VERSION
+            }), 400
 
         package = produce_package(prims, name, quality)
 
@@ -935,7 +1005,11 @@ def finalize():
 
     except Exception as exc:
         traceback.print_exc()
-        return jsonify({"ok": False, "error": str(exc), "version": VERSION}), 500
+        return jsonify({
+            "ok": False,
+            "error": str(exc),
+            "version": VERSION
+        }), 500
 
 
 @app.route("/job/<package_id>", methods=["GET"])
@@ -952,6 +1026,7 @@ def job_page(package_id: str):
     summary = package.get("summary", {})
     upload = summary.get("upload", {})
     preview = summary.get("preview", {})
+    ultra = summary.get("ultra", {})
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -1023,8 +1098,9 @@ def job_page(package_id: str):
             <h1>M3D3 Mesh Ready</h1>
             <p class="meta">Version: <code>{VERSION}</code></p>
             <p class="meta">Package ID: <code>{package_id}</code></p>
-            <p class="meta">Upload Mesh: <code>{upload.get("faces", "?")} faces</code> / <code>{upload.get("vertices", "?")} vertices</code></p>
+            <p class="meta">SL Ready Upload: <code>{upload.get("faces", "?")} faces</code> / <code>{upload.get("vertices", "?")} vertices</code></p>
             <p class="meta">Preview Mesh: <code>{preview.get("faces", "?")} faces</code> / <code>{preview.get("vertices", "?")} vertices</code></p>
+            <p class="meta">Low LOD Mesh: <code>{ultra.get("faces", "?")} faces</code> / <code>{ultra.get("vertices", "?")} vertices</code></p>
             <p class="meta">Dimensions: <code>{upload.get("dimensions", "?")}</code></p>
         </div>
 
@@ -1085,9 +1161,14 @@ def validate(filename: str):
     meta_path = path + ".meta.json"
 
     if not os.path.exists(path):
-        return jsonify({"ok": False, "error": "file not found", "version": VERSION}), 404
+        return jsonify({
+            "ok": False,
+            "error": "file not found",
+            "version": VERSION
+        }), 404
 
     text = ""
+
     try:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
@@ -1095,6 +1176,7 @@ def validate(filename: str):
         pass
 
     meta = {}
+
     if os.path.exists(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
@@ -1166,7 +1248,7 @@ def test_export():
             }
         ]
 
-        package = produce_package(test_prims, "M3D3_Box_Sphere_Test", 20)
+        package = produce_package(test_prims, "M3D3_Box_Sphere_Test", DEFAULT_QUALITY)
         urls = package_urls(package)
 
         return jsonify({
@@ -1183,7 +1265,11 @@ def test_export():
 
     except Exception as exc:
         traceback.print_exc()
-        return jsonify({"ok": False, "error": str(exc), "version": VERSION}), 500
+        return jsonify({
+            "ok": False,
+            "error": str(exc),
+            "version": VERSION
+        }), 500
 
 
 if __name__ == "__main__":
