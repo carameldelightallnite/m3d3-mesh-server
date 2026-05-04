@@ -1,3 +1,25 @@
+# =========================================================
+# M3D3 PRIM TO MESH SERVER
+# NN-STYLE MULTI-GEOMETRY Z_UP SPHERIFIED LOW-LI UPLOAD BASE
+#
+# Version:
+# M3D3_NN_STYLE_SPHERIFIED_LOW_LI_UPLOAD_2026_05_04
+#
+# Purpose:
+# - Preserve the working generator -> receiver -> server -> job page pipeline.
+# - Preserve NN-style multi-geometry PRIM_0000 / PRIM_0001 DAE output.
+# - Keep the job page and preview workflow.
+# - Replace ugly low-poly UV sphere with a spherified cube sphere.
+# - Keep default sphere at 192 triangles but distribute faces evenly.
+# - Keep preview GLB higher quality than upload DAE.
+#
+# Current known results:
+# - 320 triangle UV sphere uploaded successfully but was about 2.7 LI.
+# - 96 triangle UV sphere uploaded low LI but looked ugly.
+# - 192 triangle UV sphere still showed ring faceting.
+# - This version uses a 192 triangle spherified cube sphere for smoother low-LI output.
+# =========================================================
+
 import os
 import time
 import uuid
@@ -12,7 +34,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
 
-VERSION = "M3D3_NN_STYLE_BALANCED_LOW_LI_UPLOAD_2026_05_04"
+VERSION = "M3D3_NN_STYLE_SPHERIFIED_LOW_LI_UPLOAD_2026_05_04"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
@@ -31,14 +53,9 @@ DEFAULT_QUALITY = 16
 MIN_QUALITY = 4
 MAX_QUALITY = 24
 
-UPLOAD_SPHERE_SEGMENTS = 16
-UPLOAD_SPHERE_RINGS = 6
-
-LOW_SPHERE_SEGMENTS = 12
-LOW_SPHERE_RINGS = 4
-
-PREVIEW_SPHERE_SEGMENTS = 32
-PREVIEW_SPHERE_RINGS = 14
+UPLOAD_SPHERIFIED_CUBE_DIVISIONS = 4
+LOW_SPHERIFIED_CUBE_DIVISIONS = 3
+PREVIEW_SPHERIFIED_CUBE_DIVISIONS = 8
 
 UPLOAD_CYLINDER_SECTIONS = 12
 UPLOAD_CONE_SECTIONS = 12
@@ -296,64 +313,85 @@ def make_cone_mesh(sections: int) -> trimesh.Trimesh:
     return clean_mesh(trimesh.creation.cone(radius=0.5, height=1.0, sections=sections))
 
 
-def make_uv_sphere_mesh(segments: int, rings: int) -> trimesh.Trimesh:
-    segments = max(6, int(segments))
-    rings = max(2, int(rings))
+def spherify_cube_point(x: float, y: float, z: float) -> List[float]:
+    x2 = x * x
+    y2 = y * y
+    z2 = z * z
+
+    sx = x * np.sqrt(max(0.0, 1.0 - (y2 / 2.0) - (z2 / 2.0) + (y2 * z2 / 3.0)))
+    sy = y * np.sqrt(max(0.0, 1.0 - (z2 / 2.0) - (x2 / 2.0) + (z2 * x2 / 3.0)))
+    sz = z * np.sqrt(max(0.0, 1.0 - (x2 / 2.0) - (y2 / 2.0) + (x2 * y2 / 3.0)))
+
+    return [sx * 0.5, sy * 0.5, sz * 0.5]
+
+
+def make_spherified_cube_sphere(divisions: int) -> trimesh.Trimesh:
+    divisions = max(2, int(divisions))
 
     vertices: List[List[float]] = []
     faces: List[List[int]] = []
+    index_map: Dict[str, int] = {}
 
-    top_index = 0
-    bottom_index = 1
+    def key_for_point(p: List[float]) -> str:
+        return f"{p[0]:.8f},{p[1]:.8f},{p[2]:.8f}"
 
-    vertices.append([0.0, 0.0, 0.5])
-    vertices.append([0.0, 0.0, -0.5])
+    def get_vertex(x: float, y: float, z: float) -> int:
+        p = spherify_cube_point(x, y, z)
+        k = key_for_point(p)
 
-    for r in range(1, rings + 1):
-        phi = np.pi * float(r) / float(rings + 1)
-        z = 0.5 * np.cos(phi)
-        radius = 0.5 * np.sin(phi)
+        if k in index_map:
+            return index_map[k]
 
-        for s in range(segments):
-            theta = 2.0 * np.pi * float(s) / float(segments)
-            x = radius * np.cos(theta)
-            y = radius * np.sin(theta)
-            vertices.append([x, y, z])
+        index = len(vertices)
+        index_map[k] = index
+        vertices.append(p)
+        return index
 
-    def ring_index(ring_number: int, segment_number: int) -> int:
-        return 2 + (ring_number * segments) + (segment_number % segments)
+    def add_face(axis: str, sign: float) -> None:
+        for i in range(divisions):
+            for j in range(divisions):
+                a = -1.0 + 2.0 * float(i) / float(divisions)
+                b = -1.0 + 2.0 * float(j) / float(divisions)
+                c = -1.0 + 2.0 * float(i + 1) / float(divisions)
+                d = -1.0 + 2.0 * float(j + 1) / float(divisions)
 
-    for s in range(segments):
-        faces.append([
-            top_index,
-            ring_index(0, s),
-            ring_index(0, s + 1)
-        ])
+                if axis == "x":
+                    v0 = get_vertex(sign, a, b)
+                    v1 = get_vertex(sign, c, b)
+                    v2 = get_vertex(sign, c, d)
+                    v3 = get_vertex(sign, a, d)
+                elif axis == "y":
+                    v0 = get_vertex(a, sign, b)
+                    v1 = get_vertex(a, sign, d)
+                    v2 = get_vertex(c, sign, d)
+                    v3 = get_vertex(c, sign, b)
+                else:
+                    v0 = get_vertex(a, b, sign)
+                    v1 = get_vertex(c, b, sign)
+                    v2 = get_vertex(c, d, sign)
+                    v3 = get_vertex(a, d, sign)
 
-    for r in range(rings - 1):
-        for s in range(segments):
-            a = ring_index(r, s)
-            b = ring_index(r, s + 1)
-            c = ring_index(r + 1, s)
-            d = ring_index(r + 1, s + 1)
+                if sign > 0:
+                    faces.append([v0, v1, v2])
+                    faces.append([v0, v2, v3])
+                else:
+                    faces.append([v0, v2, v1])
+                    faces.append([v0, v3, v2])
 
-            faces.append([a, c, b])
-            faces.append([b, c, d])
+    add_face("x", 1.0)
+    add_face("x", -1.0)
+    add_face("y", 1.0)
+    add_face("y", -1.0)
+    add_face("z", 1.0)
+    add_face("z", -1.0)
 
-    last_ring = rings - 1
-
-    for s in range(segments):
-        faces.append([
-            ring_index(last_ring, s + 1),
-            ring_index(last_ring, s),
-            bottom_index
-        ])
-
-    return clean_mesh(trimesh.Trimesh(
+    mesh = trimesh.Trimesh(
         vertices=np.array(vertices, dtype=float),
         faces=np.array(faces, dtype=int),
         process=False
-    ))
+    )
+
+    return clean_mesh(mesh)
 
 
 def make_torus_mesh(major_sections: int, minor_sections: int) -> trimesh.Trimesh:
@@ -404,29 +442,26 @@ def make_prism_mesh() -> trimesh.Trimesh:
 
 def build_base_mesh(shape: str, mode: str, quality: int) -> trimesh.Trimesh:
     if mode == "preview":
-        sphere_segments = max(PREVIEW_SPHERE_SEGMENTS, quality * 2)
-        sphere_rings = max(PREVIEW_SPHERE_RINGS, quality)
+        sphere_divisions = PREVIEW_SPHERIFIED_CUBE_DIVISIONS
         cylinder_sections = max(PREVIEW_CYLINDER_SECTIONS, quality * 2)
         cone_sections = max(PREVIEW_CONE_SECTIONS, quality * 2)
         torus_major = max(PREVIEW_TORUS_MAJOR, quality * 2)
         torus_minor = max(PREVIEW_TORUS_MINOR, quality // 2)
     elif mode == "low":
-        sphere_segments = LOW_SPHERE_SEGMENTS
-        sphere_rings = LOW_SPHERE_RINGS
+        sphere_divisions = LOW_SPHERIFIED_CUBE_DIVISIONS
         cylinder_sections = LOW_CYLINDER_SECTIONS
         cone_sections = LOW_CONE_SECTIONS
         torus_major = LOW_TORUS_MAJOR
         torus_minor = LOW_TORUS_MINOR
     else:
-        sphere_segments = UPLOAD_SPHERE_SEGMENTS
-        sphere_rings = UPLOAD_SPHERE_RINGS
+        sphere_divisions = UPLOAD_SPHERIFIED_CUBE_DIVISIONS
         cylinder_sections = UPLOAD_CYLINDER_SECTIONS
         cone_sections = UPLOAD_CONE_SECTIONS
         torus_major = UPLOAD_TORUS_MAJOR
         torus_minor = UPLOAD_TORUS_MINOR
 
     if shape == "SPHERE":
-        return make_uv_sphere_mesh(sphere_segments, sphere_rings)
+        return make_spherified_cube_sphere(sphere_divisions)
 
     if shape == "CYLINDER":
         return make_cylinder_mesh(cylinder_sections)
@@ -931,7 +966,7 @@ def health():
     return jsonify({
         "ok": True,
         "version": VERSION,
-        "server": "M3D3 NN Style Balanced Low LI Upload Base",
+        "server": "M3D3 NN Style Spherified Low LI Upload Base",
         "active_jobs": list(jobs.keys()),
         "result_jobs": list(results.keys()),
         "outputs": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
