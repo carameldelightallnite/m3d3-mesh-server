@@ -1,14 +1,19 @@
 # =========================================================
 # M3D3 PLATINUM PRIM TO MESH SERVER
-# STRICT Z_UP GENERATOR/RECEIVER BUILD — PANEL EXCLUSION VERSION
+# STRICT Z_UP GENERATOR/RECEIVER BUILD — SMOOTH NORMAL VERSION
+#
+# Version:
+# M3D3_STRICT_ZUP_SMOOTH_NORMALS_2026_05_04
 #
 # Fixes:
-# - Rejects accidental generator-panel-only exports
-# - Writes only strict Z_UP Collada 1.4.1 DAE files
-# - Never uses trimesh DAE exporter for SL DAE output
-# - LOWEST and PHYS are proxy boxes only
-# - One job page link delivery
-# - DAE / OBJ / GLB / LOD ZIP downloads
+# - Smooth sphere shading using vertex normals
+# - Keeps Z_UP Collada 1.4.1
+# - Keeps one-link job page
+# - Keeps web preview
+# - Keeps DAE / OBJ / GLB / LOD ZIP downloads
+# - Keeps panel exclusion
+# - Keeps LOWEST and PHYS as simple proxy boxes
+# - Keeps Render single-worker in-memory job model
 # =========================================================
 
 import os
@@ -25,7 +30,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
 
-VERSION = "M3D3_STRICT_ZUP_PANEL_EXCLUSION_2026_05_04"
+VERSION = "M3D3_STRICT_ZUP_SMOOTH_NORMALS_2026_05_04"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
@@ -39,10 +44,14 @@ FILE_TTL_SECONDS = 3600
 MIN_AXIS_SIZE = 0.001
 MAX_SL_SIZE = 64.0
 
-MAX_HIGH_FACES = 3500
-MAX_MEDIUM_FACES = 1200
-MAX_LOW_FACES = 350
+MAX_HIGH_FACES = 4500
+MAX_MEDIUM_FACES = 1400
+MAX_LOW_FACES = 400
 
+
+# =========================================================
+# BASIC HELPERS
+# =========================================================
 
 def now_ts() -> float:
     return time.time()
@@ -157,6 +166,10 @@ def mesh_report(mesh: trimesh.Trimesh) -> Dict[str, Any]:
     }
 
 
+# =========================================================
+# MESH CLEANING
+# =========================================================
+
 def clean_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     try:
         mesh.remove_infinite_values()
@@ -226,6 +239,10 @@ def center_mesh_to_origin(mesh: trimesh.Trimesh) -> Tuple[trimesh.Trimesh, Dict[
     return mesh, report
 
 
+# =========================================================
+# PANEL EXCLUSION
+# =========================================================
+
 def is_generator_panel_prim(prim: Dict[str, Any]) -> bool:
     role = str(prim.get("role", "")).upper()
     source = str(prim.get("source", "")).upper()
@@ -268,6 +285,10 @@ def validate_not_panel_only(prims: List[Dict[str, Any]]) -> None:
             raise RuntimeError("Detected a single thin panel/button, not a build. Mesh generation cancelled.")
 
 
+# =========================================================
+# PRIM GEOMETRY BUILDERS
+# =========================================================
+
 def build_box(size: np.ndarray) -> trimesh.Trimesh:
     return trimesh.creation.box(extents=size)
 
@@ -277,15 +298,29 @@ def build_cylinder(size: np.ndarray) -> trimesh.Trimesh:
     radius = base * 0.5
     height = max(float(size[2]), MIN_AXIS_SIZE)
 
-    mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=32)
-    mesh.apply_scale([size[0] / base, size[1] / base, 1.0])
-    return mesh
+    mesh = trimesh.creation.cylinder(
+        radius=radius,
+        height=height,
+        sections=48
+    )
+
+    mesh.apply_scale([
+        size[0] / base,
+        size[1] / base,
+        1.0
+    ])
+
+    return clean_mesh(mesh)
 
 
 def build_sphere(size: np.ndarray) -> trimesh.Trimesh:
-    mesh = trimesh.creation.uv_sphere(radius=0.5, count=[32, 32])
+    mesh = trimesh.creation.uv_sphere(
+        radius=0.5,
+        count=[48, 32]
+    )
+
     mesh.apply_scale(size)
-    return mesh
+    return clean_mesh(mesh)
 
 
 def build_torus(size: np.ndarray) -> trimesh.Trimesh:
@@ -297,19 +332,24 @@ def build_torus(size: np.ndarray) -> trimesh.Trimesh:
         mesh = trimesh.creation.torus(
             major_radius=major,
             minor_radius=minor,
-            major_sections=48,
-            minor_sections=16
+            major_sections=64,
+            minor_sections=20
         )
     except TypeError:
         mesh = trimesh.creation.torus(
             radius=major,
             tube_radius=minor,
-            sections=48,
-            segments=16
+            sections=64,
+            segments=20
         )
 
-    mesh.apply_scale([size[0] / base, size[1] / base, 1.0])
-    return mesh
+    mesh.apply_scale([
+        size[0] / base,
+        size[1] / base,
+        1.0
+    ])
+
+    return clean_mesh(mesh)
 
 
 def build_cone(size: np.ndarray) -> trimesh.Trimesh:
@@ -317,9 +357,19 @@ def build_cone(size: np.ndarray) -> trimesh.Trimesh:
     radius = base * 0.5
     height = max(float(size[2]), MIN_AXIS_SIZE)
 
-    mesh = trimesh.creation.cone(radius=radius, height=height, sections=32)
-    mesh.apply_scale([size[0] / base, size[1] / base, 1.0])
-    return mesh
+    mesh = trimesh.creation.cone(
+        radius=radius,
+        height=height,
+        sections=48
+    )
+
+    mesh.apply_scale([
+        size[0] / base,
+        size[1] / base,
+        1.0
+    ])
+
+    return clean_mesh(mesh)
 
 
 def build_prism(size: np.ndarray) -> trimesh.Trimesh:
@@ -347,12 +397,34 @@ def build_prism(size: np.ndarray) -> trimesh.Trimesh:
         [2, 3, 0]
     ], dtype=int)
 
-    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    return clean_mesh(trimesh.Trimesh(vertices=verts, faces=faces, process=False))
 
 
 def build_mesh_from_prim(prim: Dict[str, Any]) -> trimesh.Trimesh:
-    size = safe_size(parse_vec(prim.get("size", "<1,1,1>"), [1.0, 1.0, 1.0]))
+    size = safe_size(parse_vec(
+        prim.get("size", "<1,1,1>"),
+        [1.0, 1.0, 1.0]
+    ))
+
     prim_type = str(prim.get("type", "BOX")).upper()
+    prim_name = str(prim.get("name", "")).lower()
+
+    if "sphere" in prim_name:
+        prim_type = "SPHERE"
+    elif "cylinder" in prim_name:
+        prim_type = "CYLINDER"
+    elif "torus" in prim_name:
+        prim_type = "TORUS"
+    elif "ring" in prim_name:
+        prim_type = "RING"
+    elif "tube" in prim_name:
+        prim_type = "TUBE"
+    elif "prism" in prim_name:
+        prim_type = "PRISM"
+    elif "cone" in prim_name:
+        prim_type = "CONE"
+    elif "box" in prim_name:
+        prim_type = "BOX"
 
     if prim_type == "CYLINDER":
         return build_cylinder(size)
@@ -387,8 +459,14 @@ def build_from_prims(prims: List[Dict[str, Any]]) -> Tuple[trimesh.Trimesh, Dict
 
             mesh = build_mesh_from_prim(prim)
 
-            pos = parse_vec(prim.get("pos", "<0,0,0>"), [0.0, 0.0, 0.0])
-            rot = parse_rot(prim.get("rot", "<0,0,0,1>"))
+            pos = parse_vec(
+                prim.get("pos", "<0,0,0>"),
+                [0.0, 0.0, 0.0]
+            )
+
+            rot = parse_rot(
+                prim.get("rot", "<0,0,0,1>")
+            )
 
             transform = trimesh.transformations.quaternion_matrix(rot)
             transform[:3, 3] = pos
@@ -413,6 +491,10 @@ def build_from_prims(prims: List[Dict[str, Any]]) -> Tuple[trimesh.Trimesh, Dict
 
     return merged, origin_report
 
+
+# =========================================================
+# LOD + PHYSICS
+# =========================================================
 
 def decimate_to_face_count(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
     mesh = clean_mesh(mesh)
@@ -508,7 +590,11 @@ def make_lod_package(high: trimesh.Trimesh) -> Dict[str, trimesh.Trimesh]:
     }
 
 
-def triangle_normal(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+# =========================================================
+# SL-SAFE COLLADA WRITER
+# =========================================================
+
+def fallback_triangle_normal(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
     n = np.cross(b - a, c - a)
     length = np.linalg.norm(n)
 
@@ -516,6 +602,16 @@ def triangle_normal(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
         return np.array([0.0, 0.0, 1.0], dtype=float)
 
     return n / length
+
+
+def normalize_vector(v: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+    v = sanitize_array(v)
+    length = np.linalg.norm(v)
+
+    if not np.isfinite(length) or length <= 0.000001:
+        return fallback
+
+    return v / length
 
 
 def projected_uv(vertex: np.ndarray, min_corner: np.ndarray, dimensions: np.ndarray) -> Tuple[float, float]:
@@ -550,6 +646,16 @@ def write_sl_safe_dae(mesh: trimesh.Trimesh, filepath: str) -> Dict[str, Any]:
     if len(vertices) == 0 or len(faces) == 0:
         raise RuntimeError("Cannot export empty mesh.")
 
+    try:
+        vertex_normals = sanitize_array(np.asarray(mesh.vertex_normals, dtype=float))
+    except Exception:
+        vertex_normals = np.zeros_like(vertices)
+        vertex_normals[:, 2] = 1.0
+
+    if len(vertex_normals) != len(vertices):
+        vertex_normals = np.zeros_like(vertices)
+        vertex_normals[:, 2] = 1.0
+
     min_corner = np.min(vertices, axis=0)
     max_corner = np.max(vertices, axis=0)
     dimensions = max_corner - min_corner
@@ -576,15 +682,29 @@ def write_sl_safe_dae(mesh: trimesh.Trimesh, filepath: str) -> Dict[str, Any]:
         if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)) or not np.all(np.isfinite(c)):
             continue
 
-        n = triangle_normal(a, b, c)
+        face_fallback = fallback_triangle_normal(a, b, c)
 
         for idx in [i0, i1, i2]:
             vertex = vertices[idx]
+            smooth_normal = normalize_vector(vertex_normals[idx], face_fallback)
             u, v = projected_uv(vertex, min_corner, dimensions)
 
-            unrolled_positions.extend([float(vertex[0]), float(vertex[1]), float(vertex[2])])
-            unrolled_normals.extend([float(n[0]), float(n[1]), float(n[2])])
-            unrolled_uvs.extend([float(u), float(v)])
+            unrolled_positions.extend([
+                float(vertex[0]),
+                float(vertex[1]),
+                float(vertex[2])
+            ])
+
+            unrolled_normals.extend([
+                float(smooth_normal[0]),
+                float(smooth_normal[1]),
+                float(smooth_normal[2])
+            ])
+
+            unrolled_uvs.extend([
+                float(u),
+                float(v)
+            ])
 
         valid_triangle_count += 1
 
@@ -728,7 +848,8 @@ def write_sl_safe_dae(mesh: trimesh.Trimesh, filepath: str) -> Dict[str, Any]:
         "has_inf": bool(np.isinf(vertices).any()),
         "node_name": "SL_Mesh_Node",
         "geometry_id": "SL_Mesh_Geom",
-        "version": VERSION
+        "version": VERSION,
+        "normal_mode": "smooth_vertex_normals"
     }
 
     with open(filepath + ".meta.json", "w", encoding="utf-8") as f:
@@ -736,6 +857,10 @@ def write_sl_safe_dae(mesh: trimesh.Trimesh, filepath: str) -> Dict[str, Any]:
 
     return meta
 
+
+# =========================================================
+# EXPORT PACKAGE
+# =========================================================
 
 def export_mesh(mesh: trimesh.Trimesh, filename: str) -> Dict[str, Any]:
     path = os.path.join(OUTPUT_DIR, filename)
@@ -845,6 +970,10 @@ def package_urls(package: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+# =========================================================
+# ROUTES
+# =========================================================
+
 @app.route("/")
 def home():
     return "M3D3 PRIM TO MESH SERVER RUNNING — " + VERSION
@@ -857,7 +986,7 @@ def health():
     return jsonify({
         "ok": True,
         "version": VERSION,
-        "server": "M3D3 Platinum Strict Z_UP Panel Exclusion Build",
+        "server": "M3D3 Platinum Strict Z_UP Smooth Normal Build",
         "active_jobs": list(jobs.keys()),
         "result_jobs": list(results.keys()),
         "outputs": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
@@ -873,10 +1002,10 @@ def upload_chunk():
         chunk = data.get("chunk", [])
 
         if job == "":
-            return jsonify({"error": "missing job"}), 400
+            return jsonify({"error": "missing job", "version": VERSION}), 400
 
         if not isinstance(chunk, list):
-            return jsonify({"error": "chunk must be list"}), 400
+            return jsonify({"error": "chunk must be list", "version": VERSION}), 400
 
         if job not in jobs:
             jobs[job] = []
@@ -928,7 +1057,10 @@ def finalize():
         prims = jobs.get(job, [])
 
         if not prims:
-            return jsonify({"error": "job has no prim data", "version": VERSION}), 400
+            return jsonify({
+                "error": "job has no prim data",
+                "version": VERSION
+            }), 400
 
         high, scan_origin = build_from_prims(prims)
         package = produce_package(high, name)
@@ -966,14 +1098,10 @@ def test_export():
         cleanup_old_files()
         cleanup_old_memory()
 
-        cube = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
-        cylinder = trimesh.creation.cylinder(radius=0.25, height=0.35, sections=16)
-        cylinder.apply_translation([0.0, 0.0, 0.675])
+        sphere = trimesh.creation.uv_sphere(radius=0.5, count=[48, 32])
+        sphere = clean_mesh(sphere)
 
-        high = trimesh.util.concatenate([cube, cylinder])
-        high = clean_mesh(high)
-
-        package = produce_package(high, "M3D3_Test")
+        package = produce_package(sphere, "M3D3_Smooth_Sphere_Test")
         urls = package_urls(package)
 
         return jsonify({
@@ -1112,6 +1240,13 @@ def job_page(package_id: str):
                 <a class="button secondary" href="{urls["LOWEST"]}">LOWEST</a>
                 <a class="button secondary" href="{urls["PHYS"]}">PHYS</a>
             </div>
+        </div>
+
+        <div class="card">
+            <h2>Upload Notes</h2>
+            <p class="meta"><b>Smooth Visual:</b> Use SL Ready DAE or HIGH from the LOD ZIP.</p>
+            <p class="meta"><b>Lower LI:</b> In the SL uploader Physics tab, use Lowest or load the PHYS file from the Advanced LOD ZIP.</p>
+            <p class="meta"><b>Advanced Mode:</b> Download LOD ZIP, unzip it, then load HIGH / MEDIUM / LOW / LOWEST / PHYS manually.</p>
         </div>
     </div>
 </body>
