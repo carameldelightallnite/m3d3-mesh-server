@@ -1,17 +1,14 @@
 # =========================================================
 # M3D3 PLATINUM PRIM TO MESH SERVER
-# FINAL GENERATOR + RECEIVER PRODUCT BUILD
+# STRICT Z_UP GENERATOR/RECEIVER BUILD — PANEL EXCLUSION VERSION
 #
-# Product Flow:
-# - Generator panel rezzes build prims
-# - Build prims contain receiver script
-# - User edits build prims
-# - Generator collects receiver reports
-# - Server builds SL-ready DAE / OBJ / GLB / LOD ZIP
-# - One web page link is returned to SL
-#
-# Render:
-# - MUST use one gunicorn worker because jobs/results are in memory
+# Fixes:
+# - Rejects accidental generator-panel-only exports
+# - Writes only strict Z_UP Collada 1.4.1 DAE files
+# - Never uses trimesh DAE exporter for SL DAE output
+# - LOWEST and PHYS are proxy boxes only
+# - One job page link delivery
+# - DAE / OBJ / GLB / LOD ZIP downloads
 # =========================================================
 
 import os
@@ -27,6 +24,8 @@ import trimesh
 from flask import Flask, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
+
+VERSION = "M3D3_STRICT_ZUP_PANEL_EXCLUSION_2026_05_04"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
@@ -44,10 +43,6 @@ MAX_HIGH_FACES = 3500
 MAX_MEDIUM_FACES = 1200
 MAX_LOW_FACES = 350
 
-
-# =========================================================
-# BASIC HELPERS
-# =========================================================
 
 def now_ts() -> float:
     return time.time()
@@ -162,10 +157,6 @@ def mesh_report(mesh: trimesh.Trimesh) -> Dict[str, Any]:
     }
 
 
-# =========================================================
-# MESH CLEANING
-# =========================================================
-
 def clean_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     try:
         mesh.remove_infinite_values()
@@ -235,9 +226,47 @@ def center_mesh_to_origin(mesh: trimesh.Trimesh) -> Tuple[trimesh.Trimesh, Dict[
     return mesh, report
 
 
-# =========================================================
-# PRIM GEOMETRY BUILDERS
-# =========================================================
+def is_generator_panel_prim(prim: Dict[str, Any]) -> bool:
+    role = str(prim.get("role", "")).upper()
+    source = str(prim.get("source", "")).upper()
+    name = str(prim.get("name", "")).lower()
+
+    if role == "GENERATOR":
+        return True
+
+    if source == "GENERATOR":
+        return True
+
+    if "generator" in name:
+        return True
+
+    if "gene_ato" in name:
+        return True
+
+    if "push" in name:
+        return True
+
+    return False
+
+
+def validate_not_panel_only(prims: List[Dict[str, Any]]) -> None:
+    if not prims:
+        raise RuntimeError("No build prim receiver data was received.")
+
+    build_prims = [p for p in prims if not is_generator_panel_prim(p)]
+
+    if not build_prims:
+        raise RuntimeError("Only the generator panel reported. Rez build prims from the generator first, then click Generate.")
+
+    if len(build_prims) == 1:
+        p = build_prims[0]
+        size = safe_size(parse_vec(p.get("size", "<1,1,1>"), [1.0, 1.0, 1.0]))
+        name = str(p.get("name", "")).lower()
+        thin = float(size[2]) <= 0.02 or float(size[0]) <= 0.02 or float(size[1]) <= 0.02
+
+        if thin and ("generator" in name or "button" in name or "panel" in name):
+            raise RuntimeError("Detected a single thin panel/button, not a build. Mesh generation cancelled.")
+
 
 def build_box(size: np.ndarray) -> trimesh.Trimesh:
     return trimesh.creation.box(extents=size)
@@ -347,10 +376,15 @@ def build_mesh_from_prim(prim: Dict[str, Any]) -> trimesh.Trimesh:
 
 
 def build_from_prims(prims: List[Dict[str, Any]]) -> Tuple[trimesh.Trimesh, Dict[str, Any]]:
+    validate_not_panel_only(prims)
+
     meshes: List[trimesh.Trimesh] = []
 
     for index, prim in enumerate(prims):
         try:
+            if is_generator_panel_prim(prim):
+                continue
+
             mesh = build_mesh_from_prim(prim)
 
             pos = parse_vec(prim.get("pos", "<0,0,0>"), [0.0, 0.0, 0.0])
@@ -367,7 +401,7 @@ def build_from_prims(prims: List[Dict[str, Any]]) -> Tuple[trimesh.Trimesh, Dict
             traceback.print_exc()
 
     if not meshes:
-        raise RuntimeError("No valid prims could be converted.")
+        raise RuntimeError("No valid build receiver prims could be converted.")
 
     merged = trimesh.util.concatenate(meshes)
     merged = clean_mesh(merged)
@@ -379,10 +413,6 @@ def build_from_prims(prims: List[Dict[str, Any]]) -> Tuple[trimesh.Trimesh, Dict
 
     return merged, origin_report
 
-
-# =========================================================
-# LOD + PHYSICS
-# =========================================================
 
 def decimate_to_face_count(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
     mesh = clean_mesh(mesh)
@@ -477,10 +507,6 @@ def make_lod_package(high: trimesh.Trimesh) -> Dict[str, trimesh.Trimesh]:
         "PHYS": phys
     }
 
-
-# =========================================================
-# SL-SAFE COLLADA WRITER
-# =========================================================
 
 def triangle_normal(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
     n = np.cross(b - a, c - a)
@@ -577,7 +603,7 @@ def write_sl_safe_dae(mesh: trimesh.Trimesh, filepath: str) -> Dict[str, Any]:
 <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
   <asset>
     <contributor>
-      <authoring_tool>M3D3 Platinum SL-Safe Exporter</authoring_tool>
+      <authoring_tool>{VERSION}</authoring_tool>
     </contributor>
     <created>2026-01-01T00:00:00Z</created>
     <modified>2026-01-01T00:00:00Z</modified>
@@ -701,7 +727,8 @@ def write_sl_safe_dae(mesh: trimesh.Trimesh, filepath: str) -> Dict[str, Any]:
         "has_nan": bool(np.isnan(vertices).any()),
         "has_inf": bool(np.isinf(vertices).any()),
         "node_name": "SL_Mesh_Node",
-        "geometry_id": "SL_Mesh_Geom"
+        "geometry_id": "SL_Mesh_Geom",
+        "version": VERSION
     }
 
     with open(filepath + ".meta.json", "w", encoding="utf-8") as f:
@@ -790,7 +817,8 @@ def produce_package(high: trimesh.Trimesh, name: str) -> Dict[str, Any]:
         "files": files,
         "metadata": metadata,
         "origin": origin_report,
-        "summary": mesh_report(lods["HIGH"])
+        "summary": mesh_report(lods["HIGH"]),
+        "version": VERSION
     }
 
     results[package_id] = package
@@ -817,13 +845,9 @@ def package_urls(package: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-# =========================================================
-# ROUTES
-# =========================================================
-
 @app.route("/")
 def home():
-    return "M3D3 PRIM TO MESH SERVER RUNNING"
+    return "M3D3 PRIM TO MESH SERVER RUNNING — " + VERSION
 
 
 @app.route("/health")
@@ -832,7 +856,8 @@ def health():
 
     return jsonify({
         "ok": True,
-        "server": "M3D3 Platinum Generator Receiver Build",
+        "version": VERSION,
+        "server": "M3D3 Platinum Strict Z_UP Panel Exclusion Build",
         "active_jobs": list(jobs.keys()),
         "result_jobs": list(results.keys()),
         "outputs": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
@@ -856,18 +881,27 @@ def upload_chunk():
         if job not in jobs:
             jobs[job] = []
 
-        jobs[job].extend(chunk)
+        before = len(jobs[job])
+        clean_chunk = []
+
+        for prim in chunk:
+            if isinstance(prim, dict):
+                clean_chunk.append(prim)
+
+        jobs[job].extend(clean_chunk)
 
         return jsonify({
             "ok": True,
+            "version": VERSION,
             "job": job,
-            "received": len(chunk),
+            "received": len(clean_chunk),
+            "previous_total": before,
             "total": len(jobs[job])
         }), 200
 
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e), "version": VERSION}), 500
 
 
 @app.route("/finalize", methods=["POST"])
@@ -881,19 +915,20 @@ def finalize():
         name = safe_name(data.get("name", "Object"))
 
         if job == "":
-            return jsonify({"error": "missing job"}), 400
+            return jsonify({"error": "missing job", "version": VERSION}), 400
 
         if job not in jobs:
             return jsonify({
                 "error": "job not found",
                 "job": job,
-                "known_jobs": list(jobs.keys())
+                "known_jobs": list(jobs.keys()),
+                "version": VERSION
             }), 400
 
         prims = jobs.get(job, [])
 
         if not prims:
-            return jsonify({"error": "job has no prim data"}), 400
+            return jsonify({"error": "job has no prim data", "version": VERSION}), 400
 
         high, scan_origin = build_from_prims(prims)
         package = produce_package(high, name)
@@ -904,6 +939,7 @@ def finalize():
 
         return jsonify({
             "ok": True,
+            "version": VERSION,
             "JOB_PAGE": urls["JOB_PAGE"],
             "DAE": urls["DAE"],
             "OBJ": urls["OBJ"],
@@ -921,7 +957,7 @@ def finalize():
 
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e), "version": VERSION}), 500
 
 
 @app.route("/test_export", methods=["GET"])
@@ -942,6 +978,7 @@ def test_export():
 
         return jsonify({
             "ok": True,
+            "version": VERSION,
             "JOB_PAGE": urls["JOB_PAGE"],
             "DAE": urls["DAE"],
             "OBJ": urls["OBJ"],
@@ -958,7 +995,7 @@ def test_export():
 
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e), "version": VERSION}), 500
 
 
 @app.route("/job/<package_id>", methods=["GET"])
@@ -1045,6 +1082,7 @@ def job_page(package_id: str):
     <div class="wrap">
         <div class="card">
             <h1>M3D3 Mesh Ready</h1>
+            <p class="meta">Version: <code>{VERSION}</code></p>
             <p class="meta">Package ID: <code>{package_id}</code></p>
             <p class="meta">Dimensions: <code>{dims}</code></p>
             <p class="meta">Faces: <code>{summary.get("faces", "?")}</code> | Vertices: <code>{summary.get("vertices", "?")}</code></p>
@@ -1075,12 +1113,6 @@ def job_page(package_id: str):
                 <a class="button secondary" href="{urls["PHYS"]}">PHYS</a>
             </div>
         </div>
-
-        <div class="card">
-            <h2>Upload Modes</h2>
-            <p class="meta"><b>Simple Mode:</b> Download <code>SL Ready DAE</code> and upload that one file.</p>
-            <p class="meta"><b>Advanced Mode:</b> Download <code>LOD ZIP</code>, unzip it, then load HIGH / MEDIUM / LOW / LOWEST / PHYS into the SL uploader manually.</p>
-        </div>
     </div>
 </body>
 </html>
@@ -1099,7 +1131,8 @@ def validate(filename: str):
             "ok": False,
             "error": "file not found",
             "requested": safe_file,
-            "available": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
+            "available": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")],
+            "version": VERSION
         }), 404
 
     dae_text = ""
@@ -1129,7 +1162,8 @@ def validate(filename: str):
         "contains_texcoord": "TEXCOORD" in dae_text,
         "contains_normals": "normals" in dae_text.lower(),
         "contains_nan_text": "nan" in dae_text.lower(),
-        "contains_inf_text": "inf" in dae_text.lower()
+        "contains_inf_text": "inf" in dae_text.lower(),
+        "contains_m3d3_version": VERSION in dae_text
     }
 
     ok = (
@@ -1143,12 +1177,14 @@ def validate(filename: str):
         checks["contains_triangles"] and
         checks["contains_texcoord"] and
         checks["contains_normals"] and
+        checks["contains_m3d3_version"] and
         not checks["contains_nan_text"] and
         not checks["contains_inf_text"]
     )
 
     return jsonify({
         "ok": ok,
+        "version": VERSION,
         "file": safe_file,
         "checks": checks,
         "metadata": meta
@@ -1164,7 +1200,8 @@ def download(filename: str):
         return jsonify({
             "error": "file not found",
             "requested": safe_file,
-            "available": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
+            "available": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")],
+            "version": VERSION
         }), 404
 
     return send_from_directory(
@@ -1173,10 +1210,6 @@ def download(filename: str):
         as_attachment=True
     )
 
-
-# =========================================================
-# LOCAL RUN
-# =========================================================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
