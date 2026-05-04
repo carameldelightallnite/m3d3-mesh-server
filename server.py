@@ -1,28 +1,19 @@
 # =========================================================
 # M3D3 PLATINUM PRIM TO MESH SERVER
-# FINAL GENERAL BUILDER DELIVERY SYSTEM
+# FINAL MERGED GENERAL BUILDER BUILD
 #
-# Render / Flask / LSL / Second Life
-#
-# Features:
-# - LSL chunked upload
-# - In-memory job store with single-worker gunicorn
-# - One-link web job page
-# - Single SL-ready DAE download
-# - Advanced LOD ZIP download
-# - OBJ download
-# - GLB download
-# - HIGH / MEDIUM / LOW / LOWEST / PHYS generation
-# - Origin recentering to remove baked SL world coordinates
-# - LOWEST and PHYS as 8-vertex / 12-triangle proxy boxes
-# - Strict SL-safe Collada 1.4.1 writer
-# - /health
-# - /test_export
-# - /validate/<filename>
+# Fixes:
+# - Prevents SL_READY DAE from being proxy cube
+# - Keeps LOWEST and PHYS as proxy only
+# - Uses Z_UP strict Collada 1.4.1
+# - Rebuilds actual scanned prim types
+# - Recenters mesh to local origin
+# - Returns one job page link
+# - Supports DAE, OBJ, GLB, and LOD ZIP
+# - Uses one-worker in-memory job model
 # =========================================================
 
 import os
-import io
 import time
 import uuid
 import json
@@ -40,9 +31,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# IMPORTANT:
-# These are in-memory by design for the current Render build.
-# Procfile MUST use --workers 1 so upload chunks and finalize stay in the same process.
 jobs: Dict[str, List[Dict[str, Any]]] = {}
 results: Dict[str, Dict[str, Any]] = {}
 
@@ -99,14 +87,13 @@ def cleanup_old_memory() -> None:
     cutoff = now_ts() - FILE_TTL_SECONDS
 
     try:
-        expired_results = []
+        expired = []
         for package_id, package in results.items():
             if float(package.get("created", 0)) < cutoff:
-                expired_results.append(package_id)
+                expired.append(package_id)
 
-        for package_id in expired_results:
+        for package_id in expired:
             del results[package_id]
-
     except Exception as exc:
         print("cleanup_old_memory error:", exc)
 
@@ -128,8 +115,6 @@ def parse_rot(value: Any) -> np.ndarray:
         if q.size < 4:
             return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
 
-        # LSL rotation = <x, y, z, s>
-        # trimesh quaternion = <w, x, y, z>
         return np.array([q[3], q[0], q[1], q[2]], dtype=float)
     except Exception:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
@@ -262,13 +247,13 @@ def build_cylinder(size: np.ndarray) -> trimesh.Trimesh:
     radius = base * 0.5
     height = max(float(size[2]), MIN_AXIS_SIZE)
 
-    mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=24)
+    mesh = trimesh.creation.cylinder(radius=radius, height=height, sections=32)
     mesh.apply_scale([size[0] / base, size[1] / base, 1.0])
     return mesh
 
 
 def build_sphere(size: np.ndarray) -> trimesh.Trimesh:
-    mesh = trimesh.creation.uv_sphere(radius=0.5, count=[24, 24])
+    mesh = trimesh.creation.uv_sphere(radius=0.5, count=[32, 32])
     mesh.apply_scale(size)
     return mesh
 
@@ -282,15 +267,15 @@ def build_torus(size: np.ndarray) -> trimesh.Trimesh:
         mesh = trimesh.creation.torus(
             major_radius=major,
             minor_radius=minor,
-            major_sections=32,
-            minor_sections=12
+            major_sections=48,
+            minor_sections=16
         )
     except TypeError:
         mesh = trimesh.creation.torus(
             radius=major,
             tube_radius=minor,
-            sections=32,
-            segments=12
+            sections=48,
+            segments=16
         )
 
     mesh.apply_scale([size[0] / base, size[1] / base, 1.0])
@@ -302,7 +287,7 @@ def build_cone(size: np.ndarray) -> trimesh.Trimesh:
     radius = base * 0.5
     height = max(float(size[2]), MIN_AXIS_SIZE)
 
-    mesh = trimesh.creation.cone(radius=radius, height=height, sections=24)
+    mesh = trimesh.creation.cone(radius=radius, height=height, sections=32)
     mesh.apply_scale([size[0] / base, size[1] / base, 1.0])
     return mesh
 
@@ -732,6 +717,7 @@ def export_mesh(mesh: trimesh.Trimesh, filename: str) -> Dict[str, Any]:
 def export_obj(mesh: trimesh.Trimesh, filename: str) -> Dict[str, Any]:
     path = os.path.join(OUTPUT_DIR, filename)
     mesh.export(path)
+
     return {
         "file": filename,
         "file_size": os.path.getsize(path),
@@ -743,6 +729,7 @@ def export_obj(mesh: trimesh.Trimesh, filename: str) -> Dict[str, Any]:
 def export_glb(mesh: trimesh.Trimesh, filename: str) -> Dict[str, Any]:
     path = os.path.join(OUTPUT_DIR, filename)
     mesh.export(path)
+
     return {
         "file": filename,
         "file_size": os.path.getsize(path),
@@ -783,6 +770,7 @@ def produce_package(high: trimesh.Trimesh, name: str) -> Dict[str, Any]:
     }
 
     zip_path = os.path.join(OUTPUT_DIR, files["ZIP"])
+
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for key in ["HIGH", "MEDIUM", "LOW", "LOWEST", "PHYS"]:
             z.write(os.path.join(OUTPUT_DIR, files[key]), files[key])
@@ -805,6 +793,7 @@ def produce_package(high: trimesh.Trimesh, name: str) -> Dict[str, Any]:
     }
 
     results[package_id] = package
+
     return package
 
 
