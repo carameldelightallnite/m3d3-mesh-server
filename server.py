@@ -1,23 +1,3 @@
-# =========================================================
-# M3D3 PRIM TO MESH SERVER
-# NN-STYLE MULTI-GEOMETRY Z_UP ULTRA-LOW-LI UPLOAD BASE
-#
-# Version:
-# M3D3_NN_STYLE_ULTRA_LOW_LI_UPLOAD_2026_05_04
-#
-# Purpose:
-# - Preserve the working generator -> receiver -> server -> job page pipeline.
-# - Preserve NN-style multi-geometry PRIM_0000 / PRIM_0001 DAE output.
-# - Keep the job page and preview workflow.
-# - Reduce default SL Ready DAE density for lower Land Impact.
-# - Keep preview GLB higher quality than upload DAE.
-#
-# Current working base:
-# - Sphere uploads successfully to Second Life.
-# - Previous default sphere was 320 triangles and around 2.7 LI.
-# - This version targets a 96-triangle default upload sphere.
-# =========================================================
-
 import os
 import time
 import uuid
@@ -32,7 +12,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
 
-VERSION = "M3D3_NN_STYLE_ULTRA_LOW_LI_UPLOAD_2026_05_04"
+VERSION = "M3D3_NN_STYLE_BALANCED_LOW_LI_UPLOAD_2026_05_04"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
@@ -51,23 +31,23 @@ DEFAULT_QUALITY = 16
 MIN_QUALITY = 4
 MAX_QUALITY = 24
 
-UPLOAD_SPHERE_SEGMENTS = 12
-UPLOAD_SPHERE_RINGS = 4
+UPLOAD_SPHERE_SEGMENTS = 16
+UPLOAD_SPHERE_RINGS = 6
 
-LOW_SPHERE_SEGMENTS = 8
-LOW_SPHERE_RINGS = 3
+LOW_SPHERE_SEGMENTS = 12
+LOW_SPHERE_RINGS = 4
 
 PREVIEW_SPHERE_SEGMENTS = 32
 PREVIEW_SPHERE_RINGS = 14
 
-UPLOAD_CYLINDER_SECTIONS = 10
-UPLOAD_CONE_SECTIONS = 10
-UPLOAD_TORUS_MAJOR = 14
-UPLOAD_TORUS_MINOR = 5
+UPLOAD_CYLINDER_SECTIONS = 12
+UPLOAD_CONE_SECTIONS = 12
+UPLOAD_TORUS_MAJOR = 16
+UPLOAD_TORUS_MINOR = 6
 
-LOW_CYLINDER_SECTIONS = 6
-LOW_CONE_SECTIONS = 6
-LOW_TORUS_MAJOR = 10
+LOW_CYLINDER_SECTIONS = 8
+LOW_CONE_SECTIONS = 8
+LOW_TORUS_MAJOR = 12
 LOW_TORUS_MINOR = 4
 
 PREVIEW_CYLINDER_SECTIONS = 36
@@ -951,7 +931,7 @@ def health():
     return jsonify({
         "ok": True,
         "version": VERSION,
-        "server": "M3D3 NN Style Ultra Low LI Upload Base",
+        "server": "M3D3 NN Style Balanced Low LI Upload Base",
         "active_jobs": list(jobs.keys()),
         "result_jobs": list(results.keys()),
         "outputs": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
