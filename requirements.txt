@@ -1,8 +1,6 @@
-flask
-numpy<2.0.0
-trimesh
-scipy
-rtree
-fast-simplification
-pycollada
-gunicorn
+Flask==2.3.2
+Werkzeug==2.3.6
+numpy==1.24.3
+trimesh==4.0.5
+fast-simplification==0.1.9
+gunicorn==20.1.0
