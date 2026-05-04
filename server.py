@@ -1,19 +1,16 @@
 # =========================================================
 # M3D3 PLATINUM STYLE PRIM TO MESH SERVER
-# FINAL SELLABLE PRODUCT BUILD
+# BAKED LOW LI FINAL BUILD
 #
 # Version:
-# M3D3_PLATINUM_STYLE_FINAL_PRODUCT_2026_05_04
+# M3D3_PLATINUM_STYLE_BAKED_LOW_LI_FINAL_2026_05_04
 #
-# Product behavior:
-# - Receives chunked Second Life build-prim reports.
-# - Excludes generator panel geometry.
-# - Builds one job page.
-# - Provides Low LI DAE and Smooth DAE.
-# - Provides GLB preview, STL, All Files ZIP, Advanced LOD ZIP.
-# - Writes strict Collada 1.4.1 Z_UP DAE files.
-# - Uses multi-geometry PRIM_0000, PRIM_0001, etc.
-# - Keeps preview quality separate from upload quality.
+# Fixes:
+# - Low LI DAE is now ONE baked mesh object, not one mesh instance per prim.
+# - Smooth DAE keeps higher detail.
+# - Advanced files remain available.
+# - Root-scanned linked builds no longer export as 1:1 prim instances.
+# - Strict Collada 1.4.1 Z_UP.
 # =========================================================
 
 import os
@@ -30,7 +27,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
 
-VERSION = "M3D3_PLATINUM_STYLE_FINAL_PRODUCT_2026_05_04"
+VERSION = "M3D3_PLATINUM_STYLE_BAKED_LOW_LI_FINAL_2026_05_04"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
@@ -52,25 +49,25 @@ MAX_QUALITY = 24
 LOW_LI_SPHERE_DIVISIONS = 4
 SMOOTH_SPHERE_DIVISIONS = 6
 PREVIEW_SPHERE_DIVISIONS = 8
-LOWEST_SPHERE_DIVISIONS = 3
+LOWEST_SPHERE_DIVISIONS = 2
 
-LOW_LI_CYLINDER_SECTIONS = 12
+LOW_LI_CYLINDER_SECTIONS = 10
 SMOOTH_CYLINDER_SECTIONS = 24
 PREVIEW_CYLINDER_SECTIONS = 36
-LOWEST_CYLINDER_SECTIONS = 8
+LOWEST_CYLINDER_SECTIONS = 6
 
-LOW_LI_CONE_SECTIONS = 12
+LOW_LI_CONE_SECTIONS = 10
 SMOOTH_CONE_SECTIONS = 24
 PREVIEW_CONE_SECTIONS = 36
-LOWEST_CONE_SECTIONS = 8
+LOWEST_CONE_SECTIONS = 6
 
-LOW_LI_TORUS_MAJOR = 16
-LOW_LI_TORUS_MINOR = 6
+LOW_LI_TORUS_MAJOR = 14
+LOW_LI_TORUS_MINOR = 5
 SMOOTH_TORUS_MAJOR = 28
 SMOOTH_TORUS_MINOR = 10
 PREVIEW_TORUS_MAJOR = 36
 PREVIEW_TORUS_MINOR = 12
-LOWEST_TORUS_MAJOR = 12
+LOWEST_TORUS_MAJOR = 10
 LOWEST_TORUS_MINOR = 4
 
 
@@ -178,20 +175,6 @@ def clamp_quality(value: Any) -> int:
     return q
 
 
-def normalize_vector(v: np.ndarray, fallback: np.ndarray) -> np.ndarray:
-    try:
-        v = np.asarray(v, dtype=float)
-        v = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
-        length = np.linalg.norm(v)
-
-        if not np.isfinite(length) or length <= 0.000001:
-            return fallback
-
-        return v / length
-    except Exception:
-        return fallback
-
-
 def clean_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     try:
         mesh.remove_infinite_values()
@@ -214,6 +197,14 @@ def clean_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
         pass
 
     try:
+        mesh.merge_vertices(digits_vertex=5)
+    except Exception:
+        try:
+            mesh.merge_vertices()
+        except Exception:
+            pass
+
+    try:
         mesh.fix_normals()
     except Exception:
         pass
@@ -233,19 +224,14 @@ def is_generator_panel_prim(prim: Dict[str, Any]) -> bool:
 
     if role == "GENERATOR":
         return True
-
     if source == "GENERATOR":
         return True
-
     if "generator" in name:
         return True
-
     if "gene_ato" in name:
         return True
-
     if "push" in name:
         return True
-
     if "panel" in name:
         return True
 
@@ -258,25 +244,18 @@ def shape_from_prim(prim: Dict[str, Any]) -> str:
 
     if "sphere" in name:
         return "SPHERE"
-
     if "cylinder" in name:
         return "CYLINDER"
-
     if "torus" in name:
         return "TORUS"
-
     if "ring" in name:
         return "RING"
-
     if "tube" in name:
         return "TUBE"
-
     if "prism" in name:
         return "PRISM"
-
     if "cone" in name:
         return "CONE"
-
     if "box" in name:
         return "BOX"
 
@@ -284,16 +263,6 @@ def shape_from_prim(prim: Dict[str, Any]) -> str:
         return prim_type
 
     return "BOX"
-
-
-def mesh_bounds_and_dims(meshes: List[trimesh.Trimesh]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    merged = clean_mesh(trimesh.util.concatenate(meshes))
-    bounds = np.asarray(merged.bounds, dtype=float)
-    min_corner = bounds[0]
-    max_corner = bounds[1]
-    center = (min_corner + max_corner) * 0.5
-    dims = np.nan_to_num(max_corner - min_corner, nan=0.0, posinf=0.0, neginf=0.0)
-    return min_corner, max_corner, center, dims
 
 
 def make_box_mesh() -> trimesh.Trimesh:
@@ -439,9 +408,9 @@ def make_prism_mesh() -> trimesh.Trimesh:
 
 def build_base_mesh(shape: str, mode: str, quality: int) -> trimesh.Trimesh:
     if mode == "preview":
-        sphere_divisions = PREVIEW_SPHERE_DIVISIONS
+        sphere_divisions = 8
         cylinder_sections = max(PREVIEW_CYLINDER_SECTIONS, quality * 2)
-        cone_sections = max(PREVIEW_CYLINDER_SECTIONS, quality * 2)
+        cone_sections = max(PREVIEW_CONE_SECTIONS, quality * 2)
         torus_major = max(PREVIEW_TORUS_MAJOR, quality * 2)
         torus_minor = max(PREVIEW_TORUS_MINOR, quality // 2)
     elif mode == "smooth":
@@ -465,19 +434,14 @@ def build_base_mesh(shape: str, mode: str, quality: int) -> trimesh.Trimesh:
 
     if shape == "SPHERE":
         return make_spherified_cube_sphere(sphere_divisions)
-
     if shape == "CYLINDER":
         return make_cylinder_mesh(cylinder_sections)
-
     if shape == "CONE":
         return make_cone_mesh(cone_sections)
-
     if shape in ["TORUS", "RING"]:
         return make_torus_mesh(torus_major, torus_minor)
-
     if shape == "TUBE":
         return make_cylinder_mesh(cylinder_sections)
-
     if shape == "PRISM":
         return make_prism_mesh()
 
@@ -509,15 +473,40 @@ def apply_prim_transform(mesh: trimesh.Trimesh, prim: Dict[str, Any]) -> trimesh
     return clean_mesh(mesh)
 
 
-def build_mesh_records(prims: List[Dict[str, Any]], mode: str, quality: int) -> Tuple[List[Dict[str, Any]], trimesh.Trimesh, Dict[str, Any]]:
+def filter_build_prims(prims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     filtered: List[Dict[str, Any]] = []
 
+    seen = set()
+
     for prim in prims:
-        if isinstance(prim, dict) and not is_generator_panel_prim(prim):
-            filtered.append(prim)
+        if not isinstance(prim, dict):
+            continue
+
+        if is_generator_panel_prim(prim):
+            continue
+
+        source = str(prim.get("source", ""))
+        link = str(prim.get("link", ""))
+        name = str(prim.get("name", ""))
+        pos = str(prim.get("pos", ""))
+        size = str(prim.get("size", ""))
+
+        duplicate_key = source + "|" + link + "|" + name + "|" + pos + "|" + size
+
+        if duplicate_key in seen:
+            continue
+
+        seen.add(duplicate_key)
+        filtered.append(prim)
+
+    return filtered
+
+
+def build_mesh_list(prims: List[Dict[str, Any]], mode: str, quality: int) -> Tuple[List[trimesh.Trimesh], Dict[str, Any]]:
+    filtered = filter_build_prims(prims)
 
     if not filtered:
-        raise RuntimeError("No build receiver prims were received. Generator panel output is rejected.")
+        raise RuntimeError("No build prims were received. Generator panel output is rejected.")
 
     meshes: List[trimesh.Trimesh] = []
 
@@ -527,39 +516,75 @@ def build_mesh_records(prims: List[Dict[str, Any]], mode: str, quality: int) -> 
         transformed = apply_prim_transform(base, prim)
         meshes.append(transformed)
 
-    min_corner, max_corner, center, dims = mesh_bounds_and_dims(meshes)
+    merged = clean_mesh(trimesh.util.concatenate(meshes))
+    bounds = np.asarray(merged.bounds, dtype=float)
+    min_corner = bounds[0]
+    max_corner = bounds[1]
+    center = (min_corner + max_corner) * 0.5
+    dims = np.nan_to_num(max_corner - min_corner, nan=0.0, posinf=0.0, neginf=0.0)
 
     if float(np.max(dims)) > MAX_SL_SIZE:
         raise RuntimeError("Build exceeds Second Life 64m mesh upload limit.")
 
-    records: List[Dict[str, Any]] = []
     centered_meshes: List[trimesh.Trimesh] = []
 
-    for i, mesh in enumerate(meshes):
+    for mesh in meshes:
         centered = mesh.copy()
         centered.apply_translation(-center)
-        centered = clean_mesh(centered)
+        centered_meshes.append(clean_mesh(centered))
 
-        records.append({
-            "id": f"PRIM_{i:04d}",
-            "name": safe_name(filtered[i].get("name", f"PRIM_{i:04d}")),
-            "shape": shape_from_prim(filtered[i]),
-            "mesh": centered
-        })
-
-        centered_meshes.append(centered)
-
-    merged = clean_mesh(trimesh.util.concatenate(centered_meshes))
+    centered_merged = clean_mesh(trimesh.util.concatenate(centered_meshes))
 
     report = {
-        "count": len(records),
+        "count": len(centered_meshes),
         "dimensions": [float(x) for x in dims],
         "center_removed": [float(x) for x in center],
-        "faces": int(len(merged.faces)),
-        "vertices": int(len(merged.vertices))
+        "faces": int(len(centered_merged.faces)),
+        "vertices": int(len(centered_merged.vertices))
     }
 
-    return records, merged, report
+    return centered_meshes, report
+
+
+def make_records_from_meshes(meshes: List[trimesh.Trimesh], prefix: str) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+
+    for i, mesh in enumerate(meshes):
+        records.append({
+            "id": f"{prefix}_{i:04d}",
+            "name": f"{prefix}_{i:04d}",
+            "mesh": clean_mesh(mesh)
+        })
+
+    return records
+
+
+def make_baked_record(meshes: List[trimesh.Trimesh], baked_id: str) -> List[Dict[str, Any]]:
+    baked = clean_mesh(trimesh.util.concatenate(meshes))
+    return [{
+        "id": baked_id,
+        "name": baked_id,
+        "mesh": baked
+    }]
+
+
+def make_box_proxy_record(meshes: List[trimesh.Trimesh], proxy_id: str) -> List[Dict[str, Any]]:
+    merged = clean_mesh(trimesh.util.concatenate(meshes))
+    bounds = np.asarray(merged.bounds, dtype=float)
+    dims = bounds[1] - bounds[0]
+    center = (bounds[0] + bounds[1]) * 0.5
+
+    dims = np.abs(dims)
+    dims[dims < MIN_AXIS_SIZE] = MIN_AXIS_SIZE
+
+    proxy = trimesh.creation.box(extents=dims)
+    proxy.apply_translation(center)
+
+    return [{
+        "id": proxy_id,
+        "name": proxy_id,
+        "mesh": clean_mesh(proxy)
+    }]
 
 
 def xml_float_list(values: List[float]) -> str:
@@ -579,24 +604,13 @@ def projected_uv(vertex: np.ndarray, min_corner: np.ndarray, dims: np.ndarray) -
 
     if not np.isfinite(u):
         u = 0.0
-
     if not np.isfinite(v):
         v = 0.0
 
     return u, v
 
 
-def fallback_face_normal(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
-    n = np.cross(b - a, c - a)
-    length = np.linalg.norm(n)
-
-    if not np.isfinite(length) or length <= 0.000001:
-        return np.array([0.0, 0.0, 1.0], dtype=float)
-
-    return n / length
-
-
-def geometry_xml(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def geometry_xml_shared(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     geom_id = record["id"]
     mesh = clean_mesh(record["mesh"])
 
@@ -624,6 +638,22 @@ def geometry_xml(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     normals: List[float] = []
     uvs: List[float] = []
 
+    for i in range(len(vertices)):
+        v = vertices[i]
+        n = vertex_normals[i]
+        nlen = np.linalg.norm(n)
+        if not np.isfinite(nlen) or nlen <= 0.000001:
+            n = np.array([0.0, 0.0, 1.0], dtype=float)
+        else:
+            n = n / nlen
+
+        u, vv = projected_uv(v, min_corner, dims)
+
+        positions.extend([float(v[0]), float(v[1]), float(v[2])])
+        normals.extend([float(n[0]), float(n[1]), float(n[2])])
+        uvs.extend([float(u), float(vv)])
+
+    p_indices: List[int] = []
     tri_count = 0
 
     for face in faces:
@@ -637,31 +667,13 @@ def geometry_xml(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         if i0 == i1 or i1 == i2 or i0 == i2:
             continue
 
-        a = vertices[i0]
-        b = vertices[i1]
-        c = vertices[i2]
-
-        if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)) or not np.all(np.isfinite(c)):
-            continue
-
-        fallback = fallback_face_normal(a, b, c)
-
-        for idx in [i0, i1, i2]:
-            vertex = vertices[idx]
-            normal = normalize_vector(vertex_normals[idx], fallback)
-            u, v = projected_uv(vertex, min_corner, dims)
-
-            positions.extend([float(vertex[0]), float(vertex[1]), float(vertex[2])])
-            normals.extend([float(normal[0]), float(normal[1]), float(normal[2])])
-            uvs.extend([float(u), float(v)])
-
+        p_indices.extend([i0, i0, i0, i1, i1, i1, i2, i2, i2])
         tri_count += 1
 
     if tri_count <= 0:
         raise RuntimeError(f"{geom_id} produced zero triangles.")
 
-    vertex_count = tri_count * 3
-    indices = list(range(vertex_count))
+    vertex_count = len(vertices)
 
     xml = f'''
     <geometry id="{geom_id}" name="{geom_id}">
@@ -704,9 +716,9 @@ def geometry_xml(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 
         <triangles material="MaterialSymbol" count="{tri_count}">
           <input semantic="VERTEX" source="#{geom_id}_VERTICES" offset="0"/>
-          <input semantic="NORMAL" source="#{geom_id}_NORMAL" offset="0"/>
-          <input semantic="TEXCOORD" source="#{geom_id}_UV" offset="0" set="0"/>
-          <p>{xml_int_list(indices)}</p>
+          <input semantic="NORMAL" source="#{geom_id}_NORMAL" offset="1"/>
+          <input semantic="TEXCOORD" source="#{geom_id}_UV" offset="2" set="0"/>
+          <p>{xml_int_list(p_indices)}</p>
         </triangles>
       </mesh>
     </geometry>
@@ -714,7 +726,6 @@ def geometry_xml(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 
     meta = {
         "id": geom_id,
-        "shape": record.get("shape", "UNKNOWN"),
         "triangles": tri_count,
         "vertices": vertex_count
     }
@@ -722,7 +733,7 @@ def geometry_xml(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     return xml, meta
 
 
-def write_multi_geometry_dae(records: List[Dict[str, Any]], filepath: str, title: str) -> Dict[str, Any]:
+def write_dae(records: List[Dict[str, Any]], filepath: str, title: str) -> Dict[str, Any]:
     geometry_blocks: List[str] = []
     node_blocks: List[str] = []
     meta_items: List[Dict[str, Any]] = []
@@ -731,7 +742,7 @@ def write_multi_geometry_dae(records: List[Dict[str, Any]], filepath: str, title
     total_vertices = 0
 
     for record in records:
-        geom_xml, geom_meta = geometry_xml(record)
+        geom_xml, geom_meta = geometry_xml_shared(record)
         geometry_blocks.append(geom_xml)
         meta_items.append(geom_meta)
 
@@ -813,7 +824,7 @@ def write_multi_geometry_dae(records: List[Dict[str, Any]], filepath: str, title
         "file_size": os.path.getsize(filepath),
         "geometry_count": len(records),
         "triangles": total_triangles,
-        "vertices_unrolled": total_vertices,
+        "vertices": total_vertices,
         "items": meta_items
     }
 
@@ -834,31 +845,6 @@ def write_preview_files(merged: trimesh.Trimesh, glb_path: str, stl_path: str) -
         "preview_faces": int(len(merged.faces)),
         "preview_vertices": int(len(merged.vertices))
     }
-
-
-def build_box_proxy_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    proxy_records: List[Dict[str, Any]] = []
-
-    for i, record in enumerate(records):
-        mesh = record["mesh"]
-        bounds = np.asarray(mesh.bounds, dtype=float)
-        dims = bounds[1] - bounds[0]
-        center = (bounds[0] + bounds[1]) * 0.5
-
-        dims = np.abs(dims)
-        dims[dims < MIN_AXIS_SIZE] = MIN_AXIS_SIZE
-
-        proxy = trimesh.creation.box(extents=dims)
-        proxy.apply_translation(center)
-
-        proxy_records.append({
-            "id": f"PRIM_{i:04d}",
-            "name": record.get("name", f"PRIM_{i:04d}"),
-            "shape": "BOX_PROXY",
-            "mesh": clean_mesh(proxy)
-        })
-
-    return proxy_records
 
 
 def package_urls(package: Dict[str, Any]) -> Dict[str, str]:
@@ -883,10 +869,20 @@ def package_urls(package: Dict[str, Any]) -> Dict[str, str]:
 
 
 def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dict[str, Any]:
-    low_li_records, low_li_merged, low_li_report = build_mesh_records(prims, "low_li", quality)
-    smooth_records, smooth_merged, smooth_report = build_mesh_records(prims, "smooth", quality)
-    preview_records, preview_merged, preview_report = build_mesh_records(prims, "preview", quality)
-    lowest_records, lowest_merged, lowest_report = build_mesh_records(prims, "lowest", quality)
+    low_meshes, low_report = build_mesh_list(prims, "low_li", quality)
+    smooth_meshes, smooth_report = build_mesh_list(prims, "smooth", quality)
+    preview_meshes, preview_report = build_mesh_list(prims, "preview", quality)
+    lowest_meshes, lowest_report = build_mesh_list(prims, "lowest", quality)
+
+    low_baked_records = make_baked_record(low_meshes, "M3D3_BAKED_LOW_LI_MESH")
+    smooth_records = make_records_from_meshes(smooth_meshes, "PRIM")
+    high_records = make_records_from_meshes(preview_meshes, "PRIM")
+    medium_baked_records = make_baked_record(smooth_meshes, "M3D3_BAKED_MEDIUM_MESH")
+    low_advanced_records = make_baked_record(low_meshes, "M3D3_BAKED_LOW_MESH")
+    lowest_records = make_box_proxy_record(lowest_meshes, "M3D3_LOWEST_PROXY")
+    phys_records = make_box_proxy_record(lowest_meshes, "M3D3_PHYS_PROXY")
+
+    preview_merged = clean_mesh(trimesh.util.concatenate(preview_meshes))
 
     uid = uuid.uuid4().hex[:8]
     package_id = uid
@@ -918,18 +914,18 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
     lowest_path = os.path.join(OUTPUT_DIR, files["LOWEST"])
     phys_path = os.path.join(OUTPUT_DIR, files["PHYS"])
 
-    low_li_meta = write_multi_geometry_dae(low_li_records, low_li_path, name + "_LOW_LI")
-    smooth_meta = write_multi_geometry_dae(smooth_records, smooth_path, name + "_SMOOTH")
+    low_li_meta = write_dae(low_baked_records, low_li_path, name + "_BAKED_LOW_LI")
+    smooth_meta = write_dae(smooth_records, smooth_path, name + "_SMOOTH")
     preview_meta = write_preview_files(preview_merged, glb_path, stl_path)
 
-    write_multi_geometry_dae(preview_records, high_path, name + "_HIGH")
-    write_multi_geometry_dae(smooth_records, medium_path, name + "_MEDIUM")
-    write_multi_geometry_dae(low_li_records, low_path, name + "_LOW")
-    write_multi_geometry_dae(build_box_proxy_records(lowest_records), lowest_path, name + "_LOWEST")
-    write_multi_geometry_dae(build_box_proxy_records(lowest_records), phys_path, name + "_PHYS")
+    write_dae(high_records, high_path, name + "_HIGH")
+    write_dae(medium_baked_records, medium_path, name + "_MEDIUM")
+    write_dae(low_advanced_records, low_path, name + "_LOW")
+    write_dae(lowest_records, lowest_path, name + "_LOWEST")
+    write_dae(phys_records, phys_path, name + "_PHYS")
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(low_li_path, "SL_Ready_Low_LI.dae")
+        z.write(low_li_path, "SL_Ready_Low_LI_Baked.dae")
         z.write(smooth_path, "SL_Ready_Smooth.dae")
         z.write(glb_path, "Preview.glb")
         z.write(stl_path, "Solid.stl")
@@ -948,7 +944,7 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
         "files": files,
         "summary": {
             "version": VERSION,
-            "low_li": low_li_report,
+            "low_li": low_report,
             "smooth": smooth_report,
             "preview": preview_report,
             "lowest": lowest_report,
@@ -976,7 +972,7 @@ def health():
     return jsonify({
         "ok": True,
         "version": VERSION,
-        "server": "M3D3 Platinum Style Final Product",
+        "server": "M3D3 Platinum Style Baked Low LI Final",
         "active_jobs": list(jobs.keys()),
         "result_jobs": list(results.keys()),
         "outputs": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
@@ -1170,7 +1166,7 @@ def job_page(package_id: str):
             <h1>M3D3 Platinum Style Mesh Ready</h1>
             <p class="meta">Version: <code>{VERSION}</code></p>
             <p class="meta">Package ID: <code>{package_id}</code></p>
-            <p class="meta">Low LI DAE: <code>{low_li.get("faces", "?")} faces</code> / <code>{low_li.get("vertices", "?")} vertices</code></p>
+            <p class="meta">Baked Low LI DAE: <code>{low_li.get("faces", "?")} faces</code> / <code>{low_li.get("vertices", "?")} vertices</code> / <code>{low_li.get("count", "?")} source pieces</code></p>
             <p class="meta">Smooth DAE: <code>{smooth.get("faces", "?")} faces</code> / <code>{smooth.get("vertices", "?")} vertices</code></p>
             <p class="meta">Preview Mesh: <code>{preview.get("faces", "?")} faces</code> / <code>{preview.get("vertices", "?")} vertices</code></p>
             <p class="meta">Dimensions: <code>{low_li.get("dimensions", "?")}</code></p>
@@ -1184,7 +1180,7 @@ def job_page(package_id: str):
         <div class="card">
             <h2>Creator Downloads</h2>
             <div class="grid">
-                <a class="button" href="{urls["LOW_LI_DAE"]}">Download SL Ready Low LI DAE</a>
+                <a class="button" href="{urls["LOW_LI_DAE"]}">Download SL Ready Baked Low LI DAE</a>
                 <a class="button" href="{urls["SMOOTH_DAE"]}">Download SL Ready Smooth DAE</a>
                 <a class="button secondary" href="{urls["GLB"]}">Download GLB Preview File</a>
                 <a class="button secondary" href="{urls["STL"]}">Download STL File</a>
@@ -1196,9 +1192,10 @@ def job_page(package_id: str):
         <div class="card">
             <h2>Usage Notes</h2>
             <div class="note">
-                Use Low LI for most builds.<br>
+                Use Baked Low LI for most multi-prim builds.<br>
                 Use Smooth for round-heavy builds.<br>
-                Use Advanced ZIP only if manually loading custom LOD or physics.
+                Use Advanced ZIP only if manually loading custom LOD or physics.<br>
+                Baked Low LI is designed to reduce mesh instances by combining the linkset into one mesh object.
             </div>
         </div>
 
@@ -1269,7 +1266,7 @@ def validate(filename: str):
         "z_up": "<up_axis>Z_UP</up_axis>" in text,
         "meter": '<unit name="meter" meter="1"/>' in text,
         "version": VERSION in text,
-        "prim_0000": "PRIM_0000" in text,
+        "baked_or_prim": "M3D3_BAKED_LOW_LI_MESH" in text or "PRIM_0000" in text,
         "not_y_up": "Y_UP" not in text,
         "not_generator_panel": "_Gene_ato_" not in text and "Generator" not in text and "generator" not in text,
         "geometry": "<geometry" in text,
@@ -1284,7 +1281,7 @@ def validate(filename: str):
         checks["z_up"] and
         checks["meter"] and
         checks["version"] and
-        checks["prim_0000"] and
+        checks["baked_or_prim"] and
         checks["not_y_up"] and
         checks["not_generator_panel"] and
         checks["geometry"] and
@@ -1310,6 +1307,8 @@ def test_export():
         test_prims = [
             {
                 "role": "BUILD",
+                "source": "ROOT_SCANNER",
+                "link": 1,
                 "type": "BOX",
                 "name": "Box",
                 "size": "<1.000000, 1.000000, 1.000000>",
@@ -1318,6 +1317,8 @@ def test_export():
             },
             {
                 "role": "BUILD",
+                "source": "ROOT_SCANNER",
+                "link": 2,
                 "type": "SPHERE",
                 "name": "Sphere",
                 "size": "<1.000000, 1.000000, 1.000000>",
