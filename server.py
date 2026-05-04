@@ -1,3 +1,21 @@
+# =========================================================
+# M3D3 PLATINUM STYLE PRIM TO MESH SERVER
+# FINAL SELLABLE PRODUCT BUILD
+#
+# Version:
+# M3D3_PLATINUM_STYLE_FINAL_PRODUCT_2026_05_04
+#
+# Product behavior:
+# - Receives chunked Second Life build-prim reports.
+# - Excludes generator panel geometry.
+# - Builds one job page.
+# - Provides Low LI DAE and Smooth DAE.
+# - Provides GLB preview, STL, All Files ZIP, Advanced LOD ZIP.
+# - Writes strict Collada 1.4.1 Z_UP DAE files.
+# - Uses multi-geometry PRIM_0000, PRIM_0001, etc.
+# - Keeps preview quality separate from upload quality.
+# =========================================================
+
 import os
 import time
 import uuid
@@ -12,7 +30,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
 
-VERSION = "M3D3_NN_STYLE_SPHERIFIED_LOW_LI_UPLOAD_2026_05_04"
+VERSION = "M3D3_PLATINUM_STYLE_FINAL_PRODUCT_2026_05_04"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
@@ -31,24 +49,29 @@ DEFAULT_QUALITY = 16
 MIN_QUALITY = 4
 MAX_QUALITY = 24
 
-UPLOAD_SPHERIFIED_CUBE_DIVISIONS = 4
-LOW_SPHERIFIED_CUBE_DIVISIONS = 3
-PREVIEW_SPHERIFIED_CUBE_DIVISIONS = 8
+LOW_LI_SPHERE_DIVISIONS = 4
+SMOOTH_SPHERE_DIVISIONS = 6
+PREVIEW_SPHERE_DIVISIONS = 8
+LOWEST_SPHERE_DIVISIONS = 3
 
-UPLOAD_CYLINDER_SECTIONS = 12
-UPLOAD_CONE_SECTIONS = 12
-UPLOAD_TORUS_MAJOR = 16
-UPLOAD_TORUS_MINOR = 6
-
-LOW_CYLINDER_SECTIONS = 8
-LOW_CONE_SECTIONS = 8
-LOW_TORUS_MAJOR = 12
-LOW_TORUS_MINOR = 4
-
+LOW_LI_CYLINDER_SECTIONS = 12
+SMOOTH_CYLINDER_SECTIONS = 24
 PREVIEW_CYLINDER_SECTIONS = 36
+LOWEST_CYLINDER_SECTIONS = 8
+
+LOW_LI_CONE_SECTIONS = 12
+SMOOTH_CONE_SECTIONS = 24
 PREVIEW_CONE_SECTIONS = 36
+LOWEST_CONE_SECTIONS = 8
+
+LOW_LI_TORUS_MAJOR = 16
+LOW_LI_TORUS_MINOR = 6
+SMOOTH_TORUS_MAJOR = 28
+SMOOTH_TORUS_MINOR = 10
 PREVIEW_TORUS_MAJOR = 36
 PREVIEW_TORUS_MINOR = 12
+LOWEST_TORUS_MAJOR = 12
+LOWEST_TORUS_MINOR = 4
 
 
 def now_ts() -> float:
@@ -106,8 +129,7 @@ def parse_vec(value: Any, fallback: Tuple[float, float, float]) -> np.ndarray:
         if arr.size < 3:
             return np.array(fallback, dtype=float)
         arr = arr[:3].astype(float)
-        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-        return arr
+        return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
     except Exception:
         return np.array(fallback, dtype=float)
 
@@ -120,10 +142,9 @@ def parse_rot(value: Any) -> np.ndarray:
         if q.size < 4:
             return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
 
-        q = q[:4].astype(float)
-        q = np.nan_to_num(q, nan=0.0, posinf=0.0, neginf=0.0)
-
+        q = np.nan_to_num(q[:4].astype(float), nan=0.0, posinf=0.0, neginf=0.0)
         length = np.linalg.norm(q)
+
         if not np.isfinite(length) or length <= 0.000001:
             return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
 
@@ -135,11 +156,11 @@ def parse_rot(value: Any) -> np.ndarray:
 
 
 def safe_size(value: Any) -> np.ndarray:
-    s = parse_vec(value, (1.0, 1.0, 1.0))
-    s = np.abs(s)
-    s[s < MIN_AXIS_SIZE] = MIN_AXIS_SIZE
-    s[s > MAX_SL_SIZE] = MAX_SL_SIZE
-    return s
+    size = parse_vec(value, (1.0, 1.0, 1.0))
+    size = np.abs(size)
+    size[size < MIN_AXIS_SIZE] = MIN_AXIS_SIZE
+    size[size > MAX_SL_SIZE] = MAX_SL_SIZE
+    return size
 
 
 def clamp_quality(value: Any) -> int:
@@ -161,7 +182,6 @@ def normalize_vector(v: np.ndarray, fallback: np.ndarray) -> np.ndarray:
     try:
         v = np.asarray(v, dtype=float)
         v = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
-
         length = np.linalg.norm(v)
 
         if not np.isfinite(length) or length <= 0.000001:
@@ -267,13 +287,12 @@ def shape_from_prim(prim: Dict[str, Any]) -> str:
 
 
 def mesh_bounds_and_dims(meshes: List[trimesh.Trimesh]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    merged = trimesh.util.concatenate(meshes)
+    merged = clean_mesh(trimesh.util.concatenate(meshes))
     bounds = np.asarray(merged.bounds, dtype=float)
     min_corner = bounds[0]
     max_corner = bounds[1]
     center = (min_corner + max_corner) * 0.5
-    dims = max_corner - min_corner
-    dims = np.nan_to_num(dims, nan=0.0, posinf=0.0, neginf=0.0)
+    dims = np.nan_to_num(max_corner - min_corner, nan=0.0, posinf=0.0, neginf=0.0)
     return min_corner, max_corner, center, dims
 
 
@@ -315,15 +334,15 @@ def make_spherified_cube_sphere(divisions: int) -> trimesh.Trimesh:
 
     def get_vertex(x: float, y: float, z: float) -> int:
         p = spherify_cube_point(x, y, z)
-        k = key_for_point(p)
+        key = key_for_point(p)
 
-        if k in index_map:
-            return index_map[k]
+        if key in index_map:
+            return index_map[key]
 
-        index = len(vertices)
-        index_map[k] = index
+        idx = len(vertices)
+        index_map[key] = idx
         vertices.append(p)
-        return index
+        return idx
 
     def add_face(axis: str, sign: float) -> None:
         for i in range(divisions):
@@ -395,7 +414,7 @@ def make_torus_mesh(major_sections: int, minor_sections: int) -> trimesh.Trimesh
 
 
 def make_prism_mesh() -> trimesh.Trimesh:
-    verts = np.array([
+    vertices = np.array([
         [-0.5, -0.5, -0.5],
         [ 0.5, -0.5, -0.5],
         [ 0.0,  0.5, -0.5],
@@ -415,28 +434,34 @@ def make_prism_mesh() -> trimesh.Trimesh:
         [2, 3, 0]
     ], dtype=int)
 
-    return clean_mesh(trimesh.Trimesh(vertices=verts, faces=faces, process=False))
+    return clean_mesh(trimesh.Trimesh(vertices=vertices, faces=faces, process=False))
 
 
 def build_base_mesh(shape: str, mode: str, quality: int) -> trimesh.Trimesh:
     if mode == "preview":
-        sphere_divisions = PREVIEW_SPHERIFIED_CUBE_DIVISIONS
+        sphere_divisions = PREVIEW_SPHERE_DIVISIONS
         cylinder_sections = max(PREVIEW_CYLINDER_SECTIONS, quality * 2)
-        cone_sections = max(PREVIEW_CONE_SECTIONS, quality * 2)
+        cone_sections = max(PREVIEW_CYLINDER_SECTIONS, quality * 2)
         torus_major = max(PREVIEW_TORUS_MAJOR, quality * 2)
         torus_minor = max(PREVIEW_TORUS_MINOR, quality // 2)
-    elif mode == "low":
-        sphere_divisions = LOW_SPHERIFIED_CUBE_DIVISIONS
-        cylinder_sections = LOW_CYLINDER_SECTIONS
-        cone_sections = LOW_CONE_SECTIONS
-        torus_major = LOW_TORUS_MAJOR
-        torus_minor = LOW_TORUS_MINOR
+    elif mode == "smooth":
+        sphere_divisions = SMOOTH_SPHERE_DIVISIONS
+        cylinder_sections = SMOOTH_CYLINDER_SECTIONS
+        cone_sections = SMOOTH_CONE_SECTIONS
+        torus_major = SMOOTH_TORUS_MAJOR
+        torus_minor = SMOOTH_TORUS_MINOR
+    elif mode == "lowest":
+        sphere_divisions = LOWEST_SPHERE_DIVISIONS
+        cylinder_sections = LOWEST_CYLINDER_SECTIONS
+        cone_sections = LOWEST_CONE_SECTIONS
+        torus_major = LOWEST_TORUS_MAJOR
+        torus_minor = LOWEST_TORUS_MINOR
     else:
-        sphere_divisions = UPLOAD_SPHERIFIED_CUBE_DIVISIONS
-        cylinder_sections = UPLOAD_CYLINDER_SECTIONS
-        cone_sections = UPLOAD_CONE_SECTIONS
-        torus_major = UPLOAD_TORUS_MAJOR
-        torus_minor = UPLOAD_TORUS_MINOR
+        sphere_divisions = LOW_LI_SPHERE_DIVISIONS
+        cylinder_sections = LOW_LI_CYLINDER_SECTIONS
+        cone_sections = LOW_LI_CONE_SECTIONS
+        torus_major = LOW_LI_TORUS_MAJOR
+        torus_minor = LOW_LI_TORUS_MINOR
 
     if shape == "SPHERE":
         return make_spherified_cube_sphere(sphere_divisions)
@@ -465,7 +490,6 @@ def apply_prim_transform(mesh: trimesh.Trimesh, prim: Dict[str, Any]) -> trimesh
     size = safe_size(prim.get("size", "<1,1,1>"))
     pos = parse_vec(prim.get("pos", "<0,0,0>"), (0.0, 0.0, 0.0))
     rot = parse_rot(prim.get("rot", "<0,0,0,1>"))
-
     shape = shape_from_prim(prim)
 
     if shape in ["TORUS", "RING"]:
@@ -766,7 +790,7 @@ def write_multi_geometry_dae(records: List[Dict[str, Any]], filepath: str, title
   </library_geometries>
 
   <library_visual_scenes>
-    <visual_scene id="Scene" name="Scene">
+    <visual_scene id="Scene" name="{title}">
 {''.join(node_blocks)}
     </visual_scene>
   </library_visual_scenes>
@@ -837,20 +861,43 @@ def build_box_proxy_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any
     return proxy_records
 
 
+def package_urls(package: Dict[str, Any]) -> Dict[str, str]:
+    host = request.host_url.rstrip("/")
+    files = package["files"]
+    package_id = package["id"]
+
+    return {
+        "JOB_PAGE": f"{host}/job/{package_id}",
+        "LOW_LI_DAE": f"{host}/download/{files['LOW_LI_DAE']}",
+        "SMOOTH_DAE": f"{host}/download/{files['SMOOTH_DAE']}",
+        "GLB": f"{host}/download/{files['GLB']}",
+        "STL": f"{host}/download/{files['STL']}",
+        "ZIP": f"{host}/download/{files['ZIP']}",
+        "ADVANCED_ZIP": f"{host}/download/{files['ADVANCED_ZIP']}",
+        "HIGH": f"{host}/download/{files['HIGH']}",
+        "MEDIUM": f"{host}/download/{files['MEDIUM']}",
+        "LOW": f"{host}/download/{files['LOW']}",
+        "LOWEST": f"{host}/download/{files['LOWEST']}",
+        "PHYS": f"{host}/download/{files['PHYS']}"
+    }
+
+
 def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dict[str, Any]:
-    upload_records, upload_merged, upload_report = build_mesh_records(prims, "upload", quality)
+    low_li_records, low_li_merged, low_li_report = build_mesh_records(prims, "low_li", quality)
+    smooth_records, smooth_merged, smooth_report = build_mesh_records(prims, "smooth", quality)
     preview_records, preview_merged, preview_report = build_mesh_records(prims, "preview", quality)
-    low_records, low_merged, low_report = build_mesh_records(prims, "low", quality)
+    lowest_records, lowest_merged, lowest_report = build_mesh_records(prims, "lowest", quality)
 
     uid = uuid.uuid4().hex[:8]
     package_id = uid
 
     files = {
-        "DAE": f"{name}_SL_READY_{uid}.dae",
+        "LOW_LI_DAE": f"{name}_SL_READY_LOW_LI_{uid}.dae",
+        "SMOOTH_DAE": f"{name}_SL_READY_SMOOTH_{uid}.dae",
         "GLB": f"{name}_PREVIEW_{uid}.glb",
         "STL": f"{name}_SOLID_{uid}.stl",
-        "ZIP": f"{name}_PACKAGE_{uid}.zip",
-        "ADVANCED_ZIP": f"{name}_ADVANCED_{uid}.zip",
+        "ZIP": f"{name}_ALL_FILES_{uid}.zip",
+        "ADVANCED_ZIP": f"{name}_ADVANCED_LOD_{uid}.zip",
         "HIGH": f"{name}_HIGH_{uid}.dae",
         "MEDIUM": f"{name}_MEDIUM_{uid}.dae",
         "LOW": f"{name}_LOW_{uid}.dae",
@@ -858,7 +905,8 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
         "PHYS": f"{name}_PHYS_{uid}.dae"
     }
 
-    dae_path = os.path.join(OUTPUT_DIR, files["DAE"])
+    low_li_path = os.path.join(OUTPUT_DIR, files["LOW_LI_DAE"])
+    smooth_path = os.path.join(OUTPUT_DIR, files["SMOOTH_DAE"])
     glb_path = os.path.join(OUTPUT_DIR, files["GLB"])
     stl_path = os.path.join(OUTPUT_DIR, files["STL"])
     zip_path = os.path.join(OUTPUT_DIR, files["ZIP"])
@@ -870,17 +918,19 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
     lowest_path = os.path.join(OUTPUT_DIR, files["LOWEST"])
     phys_path = os.path.join(OUTPUT_DIR, files["PHYS"])
 
-    dae_meta = write_multi_geometry_dae(upload_records, dae_path, name)
+    low_li_meta = write_multi_geometry_dae(low_li_records, low_li_path, name + "_LOW_LI")
+    smooth_meta = write_multi_geometry_dae(smooth_records, smooth_path, name + "_SMOOTH")
     preview_meta = write_preview_files(preview_merged, glb_path, stl_path)
 
     write_multi_geometry_dae(preview_records, high_path, name + "_HIGH")
-    write_multi_geometry_dae(upload_records, medium_path, name + "_MEDIUM")
-    write_multi_geometry_dae(low_records, low_path, name + "_LOW")
-    write_multi_geometry_dae(build_box_proxy_records(low_records), lowest_path, name + "_LOWEST")
-    write_multi_geometry_dae(build_box_proxy_records(low_records), phys_path, name + "_PHYS")
+    write_multi_geometry_dae(smooth_records, medium_path, name + "_MEDIUM")
+    write_multi_geometry_dae(low_li_records, low_path, name + "_LOW")
+    write_multi_geometry_dae(build_box_proxy_records(lowest_records), lowest_path, name + "_LOWEST")
+    write_multi_geometry_dae(build_box_proxy_records(lowest_records), phys_path, name + "_PHYS")
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(dae_path, "SL_Ready.dae")
+        z.write(low_li_path, "SL_Ready_Low_LI.dae")
+        z.write(smooth_path, "SL_Ready_Smooth.dae")
         z.write(glb_path, "Preview.glb")
         z.write(stl_path, "Solid.stl")
 
@@ -898,10 +948,12 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
         "files": files,
         "summary": {
             "version": VERSION,
-            "upload": upload_report,
+            "low_li": low_li_report,
+            "smooth": smooth_report,
             "preview": preview_report,
-            "low": low_report,
-            "dae": dae_meta,
+            "lowest": lowest_report,
+            "low_li_dae": low_li_meta,
+            "smooth_dae": smooth_meta,
             "preview_files": preview_meta
         }
     }
@@ -911,29 +963,9 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
     return package
 
 
-def package_urls(package: Dict[str, Any]) -> Dict[str, str]:
-    host = request.host_url.rstrip("/")
-    files = package["files"]
-    package_id = package["id"]
-
-    return {
-        "JOB_PAGE": f"{host}/job/{package_id}",
-        "DAE": f"{host}/download/{files['DAE']}",
-        "GLB": f"{host}/download/{files['GLB']}",
-        "STL": f"{host}/download/{files['STL']}",
-        "ZIP": f"{host}/download/{files['ZIP']}",
-        "ADVANCED_ZIP": f"{host}/download/{files['ADVANCED_ZIP']}",
-        "HIGH": f"{host}/download/{files['HIGH']}",
-        "MEDIUM": f"{host}/download/{files['MEDIUM']}",
-        "LOW": f"{host}/download/{files['LOW']}",
-        "LOWEST": f"{host}/download/{files['LOWEST']}",
-        "PHYS": f"{host}/download/{files['PHYS']}"
-    }
-
-
 @app.route("/", methods=["GET"])
 def home():
-    return f"M3D3 PRIM TO MESH SERVER RUNNING - {VERSION}"
+    return f"M3D3 PLATINUM STYLE PRIM TO MESH SERVER RUNNING - {VERSION}"
 
 
 @app.route("/health", methods=["GET"])
@@ -944,7 +976,7 @@ def health():
     return jsonify({
         "ok": True,
         "version": VERSION,
-        "server": "M3D3 NN Style Spherified Low LI Upload Base",
+        "server": "M3D3 Platinum Style Final Product",
         "active_jobs": list(jobs.keys()),
         "result_jobs": list(results.keys()),
         "outputs": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
@@ -955,23 +987,14 @@ def health():
 def upload_chunk():
     try:
         data = request.get_json(force=True)
-
         job = str(data.get("job", "")).strip()
         chunk = data.get("chunk", [])
 
         if job == "":
-            return jsonify({
-                "ok": False,
-                "error": "missing job",
-                "version": VERSION
-            }), 400
+            return jsonify({"ok": False, "error": "missing job", "version": VERSION}), 400
 
         if not isinstance(chunk, list):
-            return jsonify({
-                "ok": False,
-                "error": "chunk must be list",
-                "version": VERSION
-            }), 400
+            return jsonify({"ok": False, "error": "chunk must be list", "version": VERSION}), 400
 
         if job not in jobs:
             jobs[job] = {
@@ -997,11 +1020,7 @@ def upload_chunk():
 
     except Exception as exc:
         traceback.print_exc()
-        return jsonify({
-            "ok": False,
-            "error": str(exc),
-            "version": VERSION
-        }), 500
+        return jsonify({"ok": False, "error": str(exc), "version": VERSION}), 500
 
 
 @app.route("/finalize", methods=["POST"])
@@ -1017,11 +1036,7 @@ def finalize():
         quality = clamp_quality(data.get("quality", DEFAULT_QUALITY))
 
         if job == "":
-            return jsonify({
-                "ok": False,
-                "error": "missing job",
-                "version": VERSION
-            }), 400
+            return jsonify({"ok": False, "error": "missing job", "version": VERSION}), 400
 
         if job not in jobs:
             return jsonify({
@@ -1035,11 +1050,7 @@ def finalize():
         prims = jobs[job]["chunks"]
 
         if not prims:
-            return jsonify({
-                "ok": False,
-                "error": "job has no prim data",
-                "version": VERSION
-            }), 400
+            return jsonify({"ok": False, "error": "job has no prim data", "version": VERSION}), 400
 
         package = produce_package(prims, name, quality)
 
@@ -1051,7 +1062,8 @@ def finalize():
             "ok": True,
             "version": VERSION,
             "JOB_PAGE": urls["JOB_PAGE"],
-            "DAE": urls["DAE"],
+            "LOW_LI_DAE": urls["LOW_LI_DAE"],
+            "SMOOTH_DAE": urls["SMOOTH_DAE"],
             "GLB": urls["GLB"],
             "STL": urls["STL"],
             "ZIP": urls["ZIP"],
@@ -1061,11 +1073,7 @@ def finalize():
 
     except Exception as exc:
         traceback.print_exc()
-        return jsonify({
-            "ok": False,
-            "error": str(exc),
-            "version": VERSION
-        }), 500
+        return jsonify({"ok": False, "error": str(exc), "version": VERSION}), 500
 
 
 @app.route("/job/<package_id>", methods=["GET"])
@@ -1080,15 +1088,15 @@ def job_page(package_id: str):
 
     urls = package_urls(package)
     summary = package.get("summary", {})
-    upload = summary.get("upload", {})
+    low_li = summary.get("low_li", {})
+    smooth = summary.get("smooth", {})
     preview = summary.get("preview", {})
-    low = summary.get("low", {})
 
     html = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>M3D3 Mesh Ready</title>
+    <title>M3D3 Platinum Style Mesh Ready</title>
     <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
     <style>
         body {{
@@ -1124,7 +1132,7 @@ def job_page(package_id: str):
         }}
         .grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
             gap: 12px;
         }}
         a.button {{
@@ -1140,6 +1148,14 @@ def job_page(package_id: str):
         a.secondary {{
             background: #333;
         }}
+        .note {{
+            padding: 12px 14px;
+            border-radius: 10px;
+            background: #0f0f0f;
+            border: 1px solid #333;
+            color: #ccc;
+            line-height: 1.6;
+        }}
         model-viewer {{
             width: 100%;
             height: 440px;
@@ -1151,13 +1167,13 @@ def job_page(package_id: str):
 <body>
     <div class="wrap">
         <div class="card">
-            <h1>M3D3 Mesh Ready</h1>
+            <h1>M3D3 Platinum Style Mesh Ready</h1>
             <p class="meta">Version: <code>{VERSION}</code></p>
             <p class="meta">Package ID: <code>{package_id}</code></p>
-            <p class="meta">SL Ready Upload: <code>{upload.get("faces", "?")} faces</code> / <code>{upload.get("vertices", "?")} vertices</code></p>
+            <p class="meta">Low LI DAE: <code>{low_li.get("faces", "?")} faces</code> / <code>{low_li.get("vertices", "?")} vertices</code></p>
+            <p class="meta">Smooth DAE: <code>{smooth.get("faces", "?")} faces</code> / <code>{smooth.get("vertices", "?")} vertices</code></p>
             <p class="meta">Preview Mesh: <code>{preview.get("faces", "?")} faces</code> / <code>{preview.get("vertices", "?")} vertices</code></p>
-            <p class="meta">Low LOD Mesh: <code>{low.get("faces", "?")} faces</code> / <code>{low.get("vertices", "?")} vertices</code></p>
-            <p class="meta">Dimensions: <code>{upload.get("dimensions", "?")}</code></p>
+            <p class="meta">Dimensions: <code>{low_li.get("dimensions", "?")}</code></p>
         </div>
 
         <div class="card">
@@ -1168,17 +1184,27 @@ def job_page(package_id: str):
         <div class="card">
             <h2>Creator Downloads</h2>
             <div class="grid">
-                <a class="button" href="{urls["DAE"]}">Download DAE File</a>
-                <a class="button secondary" href="{urls["GLB"]}">Download GLB File</a>
+                <a class="button" href="{urls["LOW_LI_DAE"]}">Download SL Ready Low LI DAE</a>
+                <a class="button" href="{urls["SMOOTH_DAE"]}">Download SL Ready Smooth DAE</a>
+                <a class="button secondary" href="{urls["GLB"]}">Download GLB Preview File</a>
                 <a class="button secondary" href="{urls["STL"]}">Download STL File</a>
                 <a class="button secondary" href="{urls["ZIP"]}">Download All Files ZIP</a>
+                <a class="button secondary" href="{urls["ADVANCED_ZIP"]}">Download Advanced LOD ZIP</a>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Usage Notes</h2>
+            <div class="note">
+                Use Low LI for most builds.<br>
+                Use Smooth for round-heavy builds.<br>
+                Use Advanced ZIP only if manually loading custom LOD or physics.
             </div>
         </div>
 
         <div class="card">
             <h2>Advanced Files</h2>
             <div class="grid">
-                <a class="button secondary" href="{urls["ADVANCED_ZIP"]}">Download Advanced ZIP</a>
                 <a class="button secondary" href="{urls["HIGH"]}">HIGH DAE</a>
                 <a class="button secondary" href="{urls["MEDIUM"]}">MEDIUM DAE</a>
                 <a class="button secondary" href="{urls["LOW"]}">LOW DAE</a>
@@ -1217,11 +1243,7 @@ def validate(filename: str):
     meta_path = path + ".meta.json"
 
     if not os.path.exists(path):
-        return jsonify({
-            "ok": False,
-            "error": "file not found",
-            "version": VERSION
-        }), 404
+        return jsonify({"ok": False, "error": "file not found", "version": VERSION}), 404
 
     text = ""
 
@@ -1243,31 +1265,31 @@ def validate(filename: str):
     checks = {
         "exists": True,
         "size": os.path.getsize(path),
+        "collada": "<COLLADA" in text,
         "z_up": "<up_axis>Z_UP</up_axis>" in text,
         "meter": '<unit name="meter" meter="1"/>' in text,
         "version": VERSION in text,
         "prim_0000": "PRIM_0000" in text,
         "not_y_up": "Y_UP" not in text,
-        "not_generator": "_Gene_ato_" not in text and "Generator" not in text,
-        "has_collada": "<COLLADA" in text,
-        "has_geometry": "<geometry" in text,
-        "has_uv": "TEXCOORD" in text,
-        "has_normals": "NORMAL" in text
+        "not_generator_panel": "_Gene_ato_" not in text and "Generator" not in text and "generator" not in text,
+        "geometry": "<geometry" in text,
+        "uv": "TEXCOORD" in text,
+        "normals": "NORMAL" in text
     }
 
     ok = (
         checks["exists"] and
         checks["size"] > 0 and
+        checks["collada"] and
         checks["z_up"] and
         checks["meter"] and
         checks["version"] and
         checks["prim_0000"] and
         checks["not_y_up"] and
-        checks["not_generator"] and
-        checks["has_collada"] and
-        checks["has_geometry"] and
-        checks["has_uv"] and
-        checks["has_normals"]
+        checks["not_generator_panel"] and
+        checks["geometry"] and
+        checks["uv"] and
+        checks["normals"]
     )
 
     return jsonify({
@@ -1311,7 +1333,8 @@ def test_export():
             "ok": True,
             "version": VERSION,
             "JOB_PAGE": urls["JOB_PAGE"],
-            "DAE": urls["DAE"],
+            "LOW_LI_DAE": urls["LOW_LI_DAE"],
+            "SMOOTH_DAE": urls["SMOOTH_DAE"],
             "GLB": urls["GLB"],
             "STL": urls["STL"],
             "ZIP": urls["ZIP"],
@@ -1321,11 +1344,7 @@ def test_export():
 
     except Exception as exc:
         traceback.print_exc()
-        return jsonify({
-            "ok": False,
-            "error": str(exc),
-            "version": VERSION
-        }), 500
+        return jsonify({"ok": False, "error": str(exc), "version": VERSION}), 500
 
 
 if __name__ == "__main__":
