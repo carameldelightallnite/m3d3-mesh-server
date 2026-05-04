@@ -1,16 +1,17 @@
 # =========================================================
 # M3D3 PLATINUM PRIM TO MESH SERVER
-# FINAL MERGED GENERAL BUILDER BUILD
+# FINAL GENERATOR + RECEIVER PRODUCT BUILD
 #
-# Fixes:
-# - Prevents SL_READY DAE from being proxy cube
-# - Keeps LOWEST and PHYS as proxy only
-# - Uses Z_UP strict Collada 1.4.1
-# - Rebuilds actual scanned prim types
-# - Recenters mesh to local origin
-# - Returns one job page link
-# - Supports DAE, OBJ, GLB, and LOD ZIP
-# - Uses one-worker in-memory job model
+# Product Flow:
+# - Generator panel rezzes build prims
+# - Build prims contain receiver script
+# - User edits build prims
+# - Generator collects receiver reports
+# - Server builds SL-ready DAE / OBJ / GLB / LOD ZIP
+# - One web page link is returned to SL
+#
+# Render:
+# - MUST use one gunicorn worker because jobs/results are in memory
 # =========================================================
 
 import os
@@ -831,7 +832,7 @@ def health():
 
     return jsonify({
         "ok": True,
-        "server": "M3D3 Platinum General Builder Delivery System",
+        "server": "M3D3 Platinum Generator Receiver Build",
         "active_jobs": list(jobs.keys()),
         "result_jobs": list(results.keys()),
         "outputs": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
@@ -981,6 +982,7 @@ def job_page(package_id: str):
 <head>
     <meta charset="utf-8">
     <title>M3D3 Mesh Ready</title>
+    <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
     <style>
         body {{
             margin: 0;
@@ -989,7 +991,7 @@ def job_page(package_id: str):
             color: #f5f5f5;
         }}
         .wrap {{
-            max-width: 980px;
+            max-width: 1080px;
             margin: 0 auto;
             padding: 32px;
         }}
@@ -1031,6 +1033,12 @@ def job_page(package_id: str):
             padding: 3px 6px;
             border-radius: 4px;
         }}
+        model-viewer {{
+            width: 100%;
+            height: 420px;
+            background: #0a0a0a;
+            border-radius: 12px;
+        }}
     </style>
 </head>
 <body>
@@ -1040,6 +1048,11 @@ def job_page(package_id: str):
             <p class="meta">Package ID: <code>{package_id}</code></p>
             <p class="meta">Dimensions: <code>{dims}</code></p>
             <p class="meta">Faces: <code>{summary.get("faces", "?")}</code> | Vertices: <code>{summary.get("vertices", "?")}</code></p>
+        </div>
+
+        <div class="card">
+            <h2>Preview</h2>
+            <model-viewer src="{urls["GLB"]}" camera-controls auto-rotate shadow-intensity="1"></model-viewer>
         </div>
 
         <div class="card">
