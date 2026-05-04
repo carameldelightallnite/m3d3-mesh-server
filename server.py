@@ -1,15 +1,16 @@
 # =========================================================
 # M3D3 PLATINUM STYLE PRIM TO MESH SERVER
-# BAKED LOW LI FINAL BUILD
+# BAKED LOW LI FINAL BUILD - MATERIAL FACES + FLAT NORMALS FIX
 #
 # Version:
-# M3D3_PLATINUM_STYLE_BAKED_LOW_LI_FINAL_2026_05_04
+# M3D3_PLATINUM_STYLE_BAKED_LOW_LI_FACE_FIX_2026_05_04
 #
 # Fixes:
-# - Low LI DAE is now ONE baked mesh object, not one mesh instance per prim.
-# - Smooth DAE keeps higher detail.
+# - Baked Low LI DAE exports as ONE mesh object for lower instances.
+# - Baked Low LI DAE now keeps multiple SL material faces instead of one face.
+# - Baked Low LI DAE uses flat normals to stop smeared gray shading.
+# - Smooth DAE remains higher detail.
 # - Advanced files remain available.
-# - Root-scanned linked builds no longer export as 1:1 prim instances.
 # - Strict Collada 1.4.1 Z_UP.
 # =========================================================
 
@@ -27,7 +28,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
 
-VERSION = "M3D3_PLATINUM_STYLE_BAKED_LOW_LI_FINAL_2026_05_04"
+VERSION = "M3D3_PLATINUM_STYLE_BAKED_LOW_LI_FACE_FIX_2026_05_04"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
@@ -41,6 +42,7 @@ JOB_TTL_SECONDS = 1800
 
 MIN_AXIS_SIZE = 0.001
 MAX_SL_SIZE = 64.0
+MAX_MATERIAL_SLOTS = 8
 
 DEFAULT_QUALITY = 16
 MIN_QUALITY = 4
@@ -197,12 +199,9 @@ def clean_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
         pass
 
     try:
-        mesh.merge_vertices(digits_vertex=5)
+        mesh.merge_vertices()
     except Exception:
-        try:
-            mesh.merge_vertices()
-        except Exception:
-            pass
+        pass
 
     try:
         mesh.fix_normals()
@@ -263,6 +262,16 @@ def shape_from_prim(prim: Dict[str, Any]) -> str:
         return prim_type
 
     return "BOX"
+
+
+def material_slot_for_prim(prim: Dict[str, Any], index: int) -> int:
+    link_value = prim.get("link", None)
+
+    try:
+        link_index = int(link_value)
+        return abs(link_index - 1) % MAX_MATERIAL_SLOTS
+    except Exception:
+        return index % MAX_MATERIAL_SLOTS
 
 
 def make_box_mesh() -> trimesh.Trimesh:
@@ -351,13 +360,11 @@ def make_spherified_cube_sphere(divisions: int) -> trimesh.Trimesh:
     add_face("z", 1.0)
     add_face("z", -1.0)
 
-    mesh = trimesh.Trimesh(
+    return clean_mesh(trimesh.Trimesh(
         vertices=np.array(vertices, dtype=float),
         faces=np.array(faces, dtype=int),
         process=False
-    )
-
-    return clean_mesh(mesh)
+    ))
 
 
 def make_torus_mesh(major_sections: int, minor_sections: int) -> trimesh.Trimesh:
@@ -408,7 +415,7 @@ def make_prism_mesh() -> trimesh.Trimesh:
 
 def build_base_mesh(shape: str, mode: str, quality: int) -> trimesh.Trimesh:
     if mode == "preview":
-        sphere_divisions = 8
+        sphere_divisions = PREVIEW_SPHERE_DIVISIONS
         cylinder_sections = max(PREVIEW_CYLINDER_SECTIONS, quality * 2)
         cone_sections = max(PREVIEW_CONE_SECTIONS, quality * 2)
         torus_major = max(PREVIEW_TORUS_MAJOR, quality * 2)
@@ -475,7 +482,6 @@ def apply_prim_transform(mesh: trimesh.Trimesh, prim: Dict[str, Any]) -> trimesh
 
 def filter_build_prims(prims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     filtered: List[Dict[str, Any]] = []
-
     seen = set()
 
     for prim in prims:
@@ -502,21 +508,31 @@ def filter_build_prims(prims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return filtered
 
 
-def build_mesh_list(prims: List[Dict[str, Any]], mode: str, quality: int) -> Tuple[List[trimesh.Trimesh], Dict[str, Any]]:
+def build_mesh_entries(prims: List[Dict[str, Any]], mode: str, quality: int) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     filtered = filter_build_prims(prims)
 
     if not filtered:
         raise RuntimeError("No build prims were received. Generator panel output is rejected.")
 
-    meshes: List[trimesh.Trimesh] = []
+    raw_entries: List[Dict[str, Any]] = []
+    raw_meshes: List[trimesh.Trimesh] = []
 
-    for prim in filtered:
+    for i, prim in enumerate(filtered):
         shape = shape_from_prim(prim)
         base = build_base_mesh(shape, mode, quality)
         transformed = apply_prim_transform(base, prim)
-        meshes.append(transformed)
+        material_slot = material_slot_for_prim(prim, i)
 
-    merged = clean_mesh(trimesh.util.concatenate(meshes))
+        raw_entries.append({
+            "mesh": transformed,
+            "shape": shape,
+            "name": safe_name(prim.get("name", f"PRIM_{i:04d}")),
+            "material_slot": material_slot
+        })
+
+        raw_meshes.append(transformed)
+
+    merged = clean_mesh(trimesh.util.concatenate(raw_meshes))
     bounds = np.asarray(merged.bounds, dtype=float)
     min_corner = bounds[0]
     max_corner = bounds[1]
@@ -526,50 +542,69 @@ def build_mesh_list(prims: List[Dict[str, Any]], mode: str, quality: int) -> Tup
     if float(np.max(dims)) > MAX_SL_SIZE:
         raise RuntimeError("Build exceeds Second Life 64m mesh upload limit.")
 
+    centered_entries: List[Dict[str, Any]] = []
     centered_meshes: List[trimesh.Trimesh] = []
 
-    for mesh in meshes:
-        centered = mesh.copy()
+    for entry in raw_entries:
+        centered = entry["mesh"].copy()
         centered.apply_translation(-center)
-        centered_meshes.append(clean_mesh(centered))
+        centered = clean_mesh(centered)
+
+        centered_entries.append({
+            "mesh": centered,
+            "shape": entry["shape"],
+            "name": entry["name"],
+            "material_slot": entry["material_slot"]
+        })
+
+        centered_meshes.append(centered)
 
     centered_merged = clean_mesh(trimesh.util.concatenate(centered_meshes))
 
     report = {
-        "count": len(centered_meshes),
+        "count": len(centered_entries),
         "dimensions": [float(x) for x in dims],
         "center_removed": [float(x) for x in center],
         "faces": int(len(centered_merged.faces)),
-        "vertices": int(len(centered_merged.vertices))
+        "vertices": int(len(centered_merged.vertices)),
+        "material_slots": min(MAX_MATERIAL_SLOTS, len(centered_entries))
     }
 
-    return centered_meshes, report
+    return centered_entries, report
 
 
-def make_records_from_meshes(meshes: List[trimesh.Trimesh], prefix: str) -> List[Dict[str, Any]]:
+def entries_to_mesh(entries: List[Dict[str, Any]]) -> trimesh.Trimesh:
+    meshes = [entry["mesh"] for entry in entries]
+    return clean_mesh(trimesh.util.concatenate(meshes))
+
+
+def make_records_from_entries(entries: List[Dict[str, Any]], prefix: str) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
 
-    for i, mesh in enumerate(meshes):
+    for i, entry in enumerate(entries):
         records.append({
             "id": f"{prefix}_{i:04d}",
             "name": f"{prefix}_{i:04d}",
-            "mesh": clean_mesh(mesh)
+            "entries": [entry],
+            "flat_normals": False,
+            "multi_material": False
         })
 
     return records
 
 
-def make_baked_record(meshes: List[trimesh.Trimesh], baked_id: str) -> List[Dict[str, Any]]:
-    baked = clean_mesh(trimesh.util.concatenate(meshes))
+def make_baked_record(entries: List[Dict[str, Any]], baked_id: str, flat_normals: bool) -> List[Dict[str, Any]]:
     return [{
         "id": baked_id,
         "name": baked_id,
-        "mesh": baked
+        "entries": entries,
+        "flat_normals": flat_normals,
+        "multi_material": True
     }]
 
 
-def make_box_proxy_record(meshes: List[trimesh.Trimesh], proxy_id: str) -> List[Dict[str, Any]]:
-    merged = clean_mesh(trimesh.util.concatenate(meshes))
+def make_box_proxy_record(entries: List[Dict[str, Any]], proxy_id: str) -> List[Dict[str, Any]]:
+    merged = entries_to_mesh(entries)
     bounds = np.asarray(merged.bounds, dtype=float)
     dims = bounds[1] - bounds[0]
     center = (bounds[0] + bounds[1]) * 0.5
@@ -579,11 +614,19 @@ def make_box_proxy_record(meshes: List[trimesh.Trimesh], proxy_id: str) -> List[
 
     proxy = trimesh.creation.box(extents=dims)
     proxy.apply_translation(center)
+    proxy = clean_mesh(proxy)
 
     return [{
         "id": proxy_id,
         "name": proxy_id,
-        "mesh": clean_mesh(proxy)
+        "entries": [{
+            "mesh": proxy,
+            "shape": "BOX_PROXY",
+            "name": proxy_id,
+            "material_slot": 0
+        }],
+        "flat_normals": True,
+        "multi_material": False
     }]
 
 
@@ -610,70 +653,220 @@ def projected_uv(vertex: np.ndarray, min_corner: np.ndarray, dims: np.ndarray) -
     return u, v
 
 
-def geometry_xml_shared(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def face_normal(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    n = np.cross(b - a, c - a)
+    length = np.linalg.norm(n)
+
+    if not np.isfinite(length) or length <= 0.000001:
+        return np.array([0.0, 0.0, 1.0], dtype=float)
+
+    return n / length
+
+
+def material_effects_xml(slot_count: int) -> str:
+    blocks = []
+
+    palette = [
+        "0.78 0.78 0.78 1",
+        "0.70 0.70 0.70 1",
+        "0.62 0.62 0.62 1",
+        "0.55 0.55 0.55 1",
+        "0.48 0.48 0.48 1",
+        "0.42 0.42 0.42 1",
+        "0.36 0.36 0.36 1",
+        "0.30 0.30 0.30 1"
+    ]
+
+    for i in range(slot_count):
+        color = palette[i % len(palette)]
+        blocks.append(f'''
+    <effect id="MAT_{i}-effect" name="MAT_{i}-effect">
+      <profile_COMMON>
+        <technique sid="common">
+          <phong>
+            <emission><color>0 0 0 1</color></emission>
+            <ambient><color>0.2 0.2 0.2 1</color></ambient>
+            <diffuse><color>{color}</color></diffuse>
+            <specular><color>0 0 0 1</color></specular>
+            <shininess><float>0</float></shininess>
+          </phong>
+        </technique>
+      </profile_COMMON>
+    </effect>
+''')
+
+    return "".join(blocks)
+
+
+def material_library_xml(slot_count: int) -> str:
+    blocks = []
+
+    for i in range(slot_count):
+        blocks.append(f'''
+    <material id="MAT_{i}" name="MAT_{i}">
+      <instance_effect url="#MAT_{i}-effect"/>
+    </material>
+''')
+
+    return "".join(blocks)
+
+
+def geometry_xml(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any], int]:
     geom_id = record["id"]
-    mesh = clean_mesh(record["mesh"])
+    entries = record["entries"]
+    flat_normals = bool(record.get("flat_normals", False))
+    multi_material = bool(record.get("multi_material", False))
 
-    vertices = np.asarray(mesh.vertices, dtype=float)
-    faces = np.asarray(mesh.faces, dtype=int)
+    all_meshes = [entry["mesh"] for entry in entries]
+    merged_for_bounds = entries_to_mesh(entries)
 
-    if len(vertices) == 0 or len(faces) == 0:
-        raise RuntimeError(f"{geom_id} has no valid mesh data.")
-
-    try:
-        vertex_normals = np.asarray(mesh.vertex_normals, dtype=float)
-    except Exception:
-        vertex_normals = np.zeros_like(vertices)
-        vertex_normals[:, 2] = 1.0
-
-    if len(vertex_normals) != len(vertices):
-        vertex_normals = np.zeros_like(vertices)
-        vertex_normals[:, 2] = 1.0
-
-    min_corner = vertices.min(axis=0)
-    max_corner = vertices.max(axis=0)
+    bounds = np.asarray(merged_for_bounds.bounds, dtype=float)
+    min_corner = bounds[0]
+    max_corner = bounds[1]
     dims = np.maximum(max_corner - min_corner, MIN_AXIS_SIZE)
 
     positions: List[float] = []
     normals: List[float] = []
     uvs: List[float] = []
 
-    for i in range(len(vertices)):
-        v = vertices[i]
-        n = vertex_normals[i]
-        nlen = np.linalg.norm(n)
-        if not np.isfinite(nlen) or nlen <= 0.000001:
-            n = np.array([0.0, 0.0, 1.0], dtype=float)
+    material_triangle_indices: Dict[int, List[int]] = {}
+    material_tri_counts: Dict[int, int] = {}
+
+    vertex_index = 0
+    total_triangles = 0
+
+    for entry_index, entry in enumerate(entries):
+        mesh = clean_mesh(entry["mesh"])
+        vertices = np.asarray(mesh.vertices, dtype=float)
+        faces = np.asarray(mesh.faces, dtype=int)
+
+        if len(vertices) == 0 or len(faces) == 0:
+            continue
+
+        material_slot = int(entry.get("material_slot", entry_index % MAX_MATERIAL_SLOTS))
+
+        if not multi_material:
+            material_slot = 0
+
+        material_slot = material_slot % MAX_MATERIAL_SLOTS
+
+        if material_slot not in material_triangle_indices:
+            material_triangle_indices[material_slot] = []
+            material_tri_counts[material_slot] = 0
+
+        if flat_normals:
+            for face in faces:
+                if len(face) != 3:
+                    continue
+
+                i0 = int(face[0])
+                i1 = int(face[1])
+                i2 = int(face[2])
+
+                if i0 == i1 or i1 == i2 or i0 == i2:
+                    continue
+
+                a = vertices[i0]
+                b = vertices[i1]
+                c = vertices[i2]
+
+                if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)) or not np.all(np.isfinite(c)):
+                    continue
+
+                n = face_normal(a, b, c)
+
+                for vertex in [a, b, c]:
+                    u, v = projected_uv(vertex, min_corner, dims)
+
+                    positions.extend([float(vertex[0]), float(vertex[1]), float(vertex[2])])
+                    normals.extend([float(n[0]), float(n[1]), float(n[2])])
+                    uvs.extend([float(u), float(v)])
+
+                    material_triangle_indices[material_slot].extend([
+                        vertex_index,
+                        vertex_index,
+                        vertex_index
+                    ])
+
+                    vertex_index += 1
+
+                material_tri_counts[material_slot] += 1
+                total_triangles += 1
         else:
-            n = n / nlen
+            try:
+                vertex_normals = np.asarray(mesh.vertex_normals, dtype=float)
+            except Exception:
+                vertex_normals = np.zeros_like(vertices)
+                vertex_normals[:, 2] = 1.0
 
-        u, vv = projected_uv(v, min_corner, dims)
+            if len(vertex_normals) != len(vertices):
+                vertex_normals = np.zeros_like(vertices)
+                vertex_normals[:, 2] = 1.0
 
-        positions.extend([float(v[0]), float(v[1]), float(v[2])])
-        normals.extend([float(n[0]), float(n[1]), float(n[2])])
-        uvs.extend([float(u), float(vv)])
+            local_to_global: Dict[int, int] = {}
 
-    p_indices: List[int] = []
-    tri_count = 0
+            for local_index, vertex in enumerate(vertices):
+                n = vertex_normals[local_index]
+                nlen = np.linalg.norm(n)
 
-    for face in faces:
-        if len(face) != 3:
-            continue
+                if not np.isfinite(nlen) or nlen <= 0.000001:
+                    n = np.array([0.0, 0.0, 1.0], dtype=float)
+                else:
+                    n = n / nlen
 
-        i0 = int(face[0])
-        i1 = int(face[1])
-        i2 = int(face[2])
+                u, v = projected_uv(vertex, min_corner, dims)
 
-        if i0 == i1 or i1 == i2 or i0 == i2:
-            continue
+                positions.extend([float(vertex[0]), float(vertex[1]), float(vertex[2])])
+                normals.extend([float(n[0]), float(n[1]), float(n[2])])
+                uvs.extend([float(u), float(v)])
 
-        p_indices.extend([i0, i0, i0, i1, i1, i1, i2, i2, i2])
-        tri_count += 1
+                local_to_global[local_index] = vertex_index
+                vertex_index += 1
 
-    if tri_count <= 0:
+            for face in faces:
+                if len(face) != 3:
+                    continue
+
+                i0 = int(face[0])
+                i1 = int(face[1])
+                i2 = int(face[2])
+
+                if i0 == i1 or i1 == i2 or i0 == i2:
+                    continue
+
+                g0 = local_to_global[i0]
+                g1 = local_to_global[i1]
+                g2 = local_to_global[i2]
+
+                material_triangle_indices[material_slot].extend([
+                    g0, g0, g0,
+                    g1, g1, g1,
+                    g2, g2, g2
+                ])
+
+                material_tri_counts[material_slot] += 1
+                total_triangles += 1
+
+    if total_triangles <= 0 or vertex_index <= 0:
         raise RuntimeError(f"{geom_id} produced zero triangles.")
 
-    vertex_count = len(vertices)
+    triangle_blocks = []
+
+    for slot in sorted(material_triangle_indices.keys()):
+        indices = material_triangle_indices[slot]
+        tri_count = material_tri_counts[slot]
+
+        if tri_count <= 0:
+            continue
+
+        triangle_blocks.append(f'''
+        <triangles material="MAT_{slot}-symbol" count="{tri_count}">
+          <input semantic="VERTEX" source="#{geom_id}_VERTICES" offset="0"/>
+          <input semantic="NORMAL" source="#{geom_id}_NORMAL" offset="1"/>
+          <input semantic="TEXCOORD" source="#{geom_id}_UV" offset="2" set="0"/>
+          <p>{xml_int_list(indices)}</p>
+        </triangles>
+''')
 
     xml = f'''
     <geometry id="{geom_id}" name="{geom_id}">
@@ -681,7 +874,7 @@ def geometry_xml_shared(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         <source id="{geom_id}_POSITION">
           <float_array id="{geom_id}_POSITION_ARRAY" count="{len(positions)}">{xml_float_list(positions)}</float_array>
           <technique_common>
-            <accessor source="#{geom_id}_POSITION_ARRAY" count="{vertex_count}" stride="3">
+            <accessor source="#{geom_id}_POSITION_ARRAY" count="{vertex_index}" stride="3">
               <param name="X" type="float"/>
               <param name="Y" type="float"/>
               <param name="Z" type="float"/>
@@ -692,7 +885,7 @@ def geometry_xml_shared(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         <source id="{geom_id}_NORMAL">
           <float_array id="{geom_id}_NORMAL_ARRAY" count="{len(normals)}">{xml_float_list(normals)}</float_array>
           <technique_common>
-            <accessor source="#{geom_id}_NORMAL_ARRAY" count="{vertex_count}" stride="3">
+            <accessor source="#{geom_id}_NORMAL_ARRAY" count="{vertex_index}" stride="3">
               <param name="X" type="float"/>
               <param name="Y" type="float"/>
               <param name="Z" type="float"/>
@@ -703,7 +896,7 @@ def geometry_xml_shared(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         <source id="{geom_id}_UV">
           <float_array id="{geom_id}_UV_ARRAY" count="{len(uvs)}">{xml_float_list(uvs)}</float_array>
           <technique_common>
-            <accessor source="#{geom_id}_UV_ARRAY" count="{vertex_count}" stride="2">
+            <accessor source="#{geom_id}_UV_ARRAY" count="{vertex_index}" stride="2">
               <param name="S" type="float"/>
               <param name="T" type="float"/>
             </accessor>
@@ -713,24 +906,22 @@ def geometry_xml_shared(record: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         <vertices id="{geom_id}_VERTICES">
           <input semantic="POSITION" source="#{geom_id}_POSITION"/>
         </vertices>
-
-        <triangles material="MaterialSymbol" count="{tri_count}">
-          <input semantic="VERTEX" source="#{geom_id}_VERTICES" offset="0"/>
-          <input semantic="NORMAL" source="#{geom_id}_NORMAL" offset="1"/>
-          <input semantic="TEXCOORD" source="#{geom_id}_UV" offset="2" set="0"/>
-          <p>{xml_int_list(p_indices)}</p>
-        </triangles>
+{''.join(triangle_blocks)}
       </mesh>
     </geometry>
 '''
 
+    used_slots = len([slot for slot in material_tri_counts.keys() if material_tri_counts[slot] > 0])
+
     meta = {
         "id": geom_id,
-        "triangles": tri_count,
-        "vertices": vertex_count
+        "triangles": total_triangles,
+        "vertices": vertex_index,
+        "material_slots": used_slots,
+        "flat_normals": flat_normals
     }
 
-    return xml, meta
+    return xml, meta, used_slots
 
 
 def write_dae(records: List[Dict[str, Any]], filepath: str, title: str) -> Dict[str, Any]:
@@ -740,13 +931,31 @@ def write_dae(records: List[Dict[str, Any]], filepath: str, title: str) -> Dict[
 
     total_triangles = 0
     total_vertices = 0
+    required_material_slots = 1
+
+    geometry_results = []
 
     for record in records:
-        geom_xml, geom_meta = geometry_xml_shared(record)
+        geom_xml, geom_meta, used_slots = geometry_xml(record)
+        geometry_results.append((record, geom_xml, geom_meta, used_slots))
+        required_material_slots = max(required_material_slots, used_slots)
+
+    required_material_slots = max(1, min(MAX_MATERIAL_SLOTS, required_material_slots))
+
+    for record, geom_xml, geom_meta, used_slots in geometry_results:
         geometry_blocks.append(geom_xml)
         meta_items.append(geom_meta)
 
         geom_id = record["id"]
+
+        material_instances = []
+
+        for slot in range(required_material_slots):
+            material_instances.append(f'''
+              <instance_material symbol="MAT_{slot}-symbol" target="#MAT_{slot}">
+                <bind_vertex_input semantic="TEXCOORD" input_semantic="TEXCOORD" input_set="0"/>
+              </instance_material>
+''')
 
         node_blocks.append(f'''
       <node id="{geom_id}_NODE" name="{geom_id}" type="NODE">
@@ -754,9 +963,7 @@ def write_dae(records: List[Dict[str, Any]], filepath: str, title: str) -> Dict[
         <instance_geometry url="#{geom_id}">
           <bind_material>
             <technique_common>
-              <instance_material symbol="MaterialSymbol" target="#Material">
-                <bind_vertex_input semantic="TEXCOORD" input_semantic="TEXCOORD" input_set="0"/>
-              </instance_material>
+{''.join(material_instances)}
             </technique_common>
           </bind_material>
         </instance_geometry>
@@ -777,23 +984,11 @@ def write_dae(records: List[Dict[str, Any]], filepath: str, title: str) -> Dict[
   </asset>
 
   <library_effects>
-    <effect id="Material-effect" name="Material-effect">
-      <profile_COMMON>
-        <technique sid="common">
-          <phong>
-            <diffuse>
-              <color>0.8 0.8 0.8 1</color>
-            </diffuse>
-          </phong>
-        </technique>
-      </profile_COMMON>
-    </effect>
+{material_effects_xml(required_material_slots)}
   </library_effects>
 
   <library_materials>
-    <material id="Material" name="Material">
-      <instance_effect url="#Material-effect"/>
-    </material>
+{material_library_xml(required_material_slots)}
   </library_materials>
 
   <library_geometries>
@@ -825,6 +1020,7 @@ def write_dae(records: List[Dict[str, Any]], filepath: str, title: str) -> Dict[
         "geometry_count": len(records),
         "triangles": total_triangles,
         "vertices": total_vertices,
+        "material_slots": required_material_slots,
         "items": meta_items
     }
 
@@ -869,20 +1065,20 @@ def package_urls(package: Dict[str, Any]) -> Dict[str, str]:
 
 
 def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dict[str, Any]:
-    low_meshes, low_report = build_mesh_list(prims, "low_li", quality)
-    smooth_meshes, smooth_report = build_mesh_list(prims, "smooth", quality)
-    preview_meshes, preview_report = build_mesh_list(prims, "preview", quality)
-    lowest_meshes, lowest_report = build_mesh_list(prims, "lowest", quality)
+    low_entries, low_report = build_mesh_entries(prims, "low_li", quality)
+    smooth_entries, smooth_report = build_mesh_entries(prims, "smooth", quality)
+    preview_entries, preview_report = build_mesh_entries(prims, "preview", quality)
+    lowest_entries, lowest_report = build_mesh_entries(prims, "lowest", quality)
 
-    low_baked_records = make_baked_record(low_meshes, "M3D3_BAKED_LOW_LI_MESH")
-    smooth_records = make_records_from_meshes(smooth_meshes, "PRIM")
-    high_records = make_records_from_meshes(preview_meshes, "PRIM")
-    medium_baked_records = make_baked_record(smooth_meshes, "M3D3_BAKED_MEDIUM_MESH")
-    low_advanced_records = make_baked_record(low_meshes, "M3D3_BAKED_LOW_MESH")
-    lowest_records = make_box_proxy_record(lowest_meshes, "M3D3_LOWEST_PROXY")
-    phys_records = make_box_proxy_record(lowest_meshes, "M3D3_PHYS_PROXY")
+    low_baked_records = make_baked_record(low_entries, "M3D3_BAKED_LOW_LI_MESH", True)
+    smooth_records = make_records_from_entries(smooth_entries, "PRIM")
+    high_records = make_records_from_entries(preview_entries, "PRIM")
+    medium_baked_records = make_baked_record(smooth_entries, "M3D3_BAKED_MEDIUM_MESH", False)
+    low_advanced_records = make_baked_record(low_entries, "M3D3_BAKED_LOW_MESH", True)
+    lowest_records = make_box_proxy_record(lowest_entries, "M3D3_LOWEST_PROXY")
+    phys_records = make_box_proxy_record(lowest_entries, "M3D3_PHYS_PROXY")
 
-    preview_merged = clean_mesh(trimesh.util.concatenate(preview_meshes))
+    preview_merged = entries_to_mesh(preview_entries)
 
     uid = uuid.uuid4().hex[:8]
     package_id = uid
@@ -925,7 +1121,7 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
     write_dae(phys_records, phys_path, name + "_PHYS")
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(low_li_path, "SL_Ready_Low_LI_Baked.dae")
+        z.write(low_li_path, "SL_Ready_Low_LI_Baked_Multi_Face.dae")
         z.write(smooth_path, "SL_Ready_Smooth.dae")
         z.write(glb_path, "Preview.glb")
         z.write(stl_path, "Solid.stl")
@@ -972,7 +1168,7 @@ def health():
     return jsonify({
         "ok": True,
         "version": VERSION,
-        "server": "M3D3 Platinum Style Baked Low LI Final",
+        "server": "M3D3 Platinum Style Baked Low LI Face Fix",
         "active_jobs": list(jobs.keys()),
         "result_jobs": list(results.keys()),
         "outputs": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
@@ -1087,6 +1283,7 @@ def job_page(package_id: str):
     low_li = summary.get("low_li", {})
     smooth = summary.get("smooth", {})
     preview = summary.get("preview", {})
+    low_li_dae = summary.get("low_li_dae", {})
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -1167,6 +1364,7 @@ def job_page(package_id: str):
             <p class="meta">Version: <code>{VERSION}</code></p>
             <p class="meta">Package ID: <code>{package_id}</code></p>
             <p class="meta">Baked Low LI DAE: <code>{low_li.get("faces", "?")} faces</code> / <code>{low_li.get("vertices", "?")} vertices</code> / <code>{low_li.get("count", "?")} source pieces</code></p>
+            <p class="meta">SL Material Slots: <code>{low_li_dae.get("material_slots", "?")}</code></p>
             <p class="meta">Smooth DAE: <code>{smooth.get("faces", "?")} faces</code> / <code>{smooth.get("vertices", "?")} vertices</code></p>
             <p class="meta">Preview Mesh: <code>{preview.get("faces", "?")} faces</code> / <code>{preview.get("vertices", "?")} vertices</code></p>
             <p class="meta">Dimensions: <code>{low_li.get("dimensions", "?")}</code></p>
@@ -1193,9 +1391,9 @@ def job_page(package_id: str):
             <h2>Usage Notes</h2>
             <div class="note">
                 Use Baked Low LI for most multi-prim builds.<br>
+                This version keeps multiple SL material faces and uses flat normals for cleaner box shading.<br>
                 Use Smooth for round-heavy builds.<br>
-                Use Advanced ZIP only if manually loading custom LOD or physics.<br>
-                Baked Low LI is designed to reduce mesh instances by combining the linkset into one mesh object.
+                Use Advanced ZIP only if manually loading custom LOD or physics.
             </div>
         </div>
 
@@ -1267,6 +1465,7 @@ def validate(filename: str):
         "meter": '<unit name="meter" meter="1"/>' in text,
         "version": VERSION in text,
         "baked_or_prim": "M3D3_BAKED_LOW_LI_MESH" in text or "PRIM_0000" in text,
+        "material_faces": "MAT_0-symbol" in text,
         "not_y_up": "Y_UP" not in text,
         "not_generator_panel": "_Gene_ato_" not in text and "Generator" not in text and "generator" not in text,
         "geometry": "<geometry" in text,
@@ -1282,6 +1481,7 @@ def validate(filename: str):
         checks["meter"] and
         checks["version"] and
         checks["baked_or_prim"] and
+        checks["material_faces"] and
         checks["not_y_up"] and
         checks["not_generator_panel"] and
         checks["geometry"] and
