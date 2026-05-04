@@ -2,16 +2,19 @@
 # M3D3 PLATINUM PRIM TO MESH SERVER
 # FINAL GENERAL BUILDER DELIVERY SYSTEM
 #
+# Render / Flask / LSL / Second Life
+#
 # Features:
-# - Chunked LSL upload
-# - One-link job page
+# - LSL chunked upload
+# - In-memory job store with single-worker gunicorn
+# - One-link web job page
 # - Single SL-ready DAE download
 # - Advanced LOD ZIP download
 # - OBJ download
 # - GLB download
 # - HIGH / MEDIUM / LOW / LOWEST / PHYS generation
-# - Origin recentering
-# - 12-triangle LOWEST and PHYS proxy boxes
+# - Origin recentering to remove baked SL world coordinates
+# - LOWEST and PHYS as 8-vertex / 12-triangle proxy boxes
 # - Strict SL-safe Collada 1.4.1 writer
 # - /health
 # - /test_export
@@ -19,7 +22,6 @@
 # =========================================================
 
 import os
-import re
 import io
 import time
 import uuid
@@ -38,6 +40,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# IMPORTANT:
+# These are in-memory by design for the current Render build.
+# Procfile MUST use --workers 1 so upload chunks and finalize stay in the same process.
 jobs: Dict[str, List[Dict[str, Any]]] = {}
 results: Dict[str, Dict[str, Any]] = {}
 
@@ -90,6 +95,22 @@ def cleanup_old_files() -> None:
         print("cleanup_old_files error:", exc)
 
 
+def cleanup_old_memory() -> None:
+    cutoff = now_ts() - FILE_TTL_SECONDS
+
+    try:
+        expired_results = []
+        for package_id, package in results.items():
+            if float(package.get("created", 0)) < cutoff:
+                expired_results.append(package_id)
+
+        for package_id in expired_results:
+            del results[package_id]
+
+    except Exception as exc:
+        print("cleanup_old_memory error:", exc)
+
+
 def parse_vec(value: Any, fallback: List[float]) -> np.ndarray:
     try:
         text = str(value).replace("<", "").replace(">", "").strip()
@@ -107,6 +128,8 @@ def parse_rot(value: Any) -> np.ndarray:
         if q.size < 4:
             return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
 
+        # LSL rotation = <x, y, z, s>
+        # trimesh quaternion = <w, x, y, z>
         return np.array([q[3], q[0], q[1], q[2]], dtype=float)
     except Exception:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
@@ -815,6 +838,8 @@ def home():
 
 @app.route("/health")
 def health():
+    cleanup_old_memory()
+
     return jsonify({
         "ok": True,
         "server": "M3D3 Platinum General Builder Delivery System",
@@ -859,6 +884,7 @@ def upload_chunk():
 def finalize():
     try:
         cleanup_old_files()
+        cleanup_old_memory()
 
         data = request.get_json(force=True)
         job = str(data.get("job", "")).strip()
@@ -912,6 +938,7 @@ def finalize():
 def test_export():
     try:
         cleanup_old_files()
+        cleanup_old_memory()
 
         cube = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
         cylinder = trimesh.creation.cylinder(radius=0.25, height=0.35, sections=16)
@@ -949,18 +976,10 @@ def job_page(package_id: str):
     package = results.get(package_id)
 
     if not package:
-        for filename in os.listdir(OUTPUT_DIR):
-            if package_id in filename:
-                package = {
-                    "id": package_id,
-                    "name": "M3D3 Mesh",
-                    "files": {},
-                    "summary": {}
-                }
-                break
-
-    if not package:
-        return Response("<h1>M3D3 Job Not Found</h1><p>This job expired or the server restarted.</p>", mimetype="text/html")
+        return Response(
+            "<h1>M3D3 Job Not Found</h1><p>This job expired, the server restarted, or the package was cleaned up.</p>",
+            mimetype="text/html"
+        )
 
     urls = package_urls(package)
 
