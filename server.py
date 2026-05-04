@@ -1,25 +1,3 @@
-# =========================================================
-# M3D3 PRIM TO MESH SERVER
-# NN-STYLE MULTI-GEOMETRY Z_UP SPHERIFIED LOW-LI UPLOAD BASE
-#
-# Version:
-# M3D3_NN_STYLE_SPHERIFIED_LOW_LI_UPLOAD_2026_05_04
-#
-# Purpose:
-# - Preserve the working generator -> receiver -> server -> job page pipeline.
-# - Preserve NN-style multi-geometry PRIM_0000 / PRIM_0001 DAE output.
-# - Keep the job page and preview workflow.
-# - Replace ugly low-poly UV sphere with a spherified cube sphere.
-# - Keep default sphere at 192 triangles but distribute faces evenly.
-# - Keep preview GLB higher quality than upload DAE.
-#
-# Current known results:
-# - 320 triangle UV sphere uploaded successfully but was about 2.7 LI.
-# - 96 triangle UV sphere uploaded low LI but looked ugly.
-# - 192 triangle UV sphere still showed ring faceting.
-# - This version uses a 192 triangle spherified cube sphere for smoother low-LI output.
-# =========================================================
-
 import os
 import time
 import uuid
