@@ -1,9 +1,9 @@
 # =========================================================
 # M3D3 PRIM TO MESH SERVER
-# NN-STYLE MULTI-GEOMETRY Z_UP LOW-LI UPLOAD BASE
+# NN-STYLE MULTI-GEOMETRY Z_UP ULTRA-LOW-LI UPLOAD BASE
 #
 # Version:
-# M3D3_NN_STYLE_LOW_LI_UPLOAD_BASE_2026_05_04
+# M3D3_NN_STYLE_ULTRA_LOW_LI_UPLOAD_2026_05_04
 #
 # Purpose:
 # - Preserve the working generator -> receiver -> server -> job page pipeline.
@@ -14,7 +14,8 @@
 #
 # Current working base:
 # - Sphere uploads successfully to Second Life.
-# - Remaining target: lower default LI toward 0.5-1 where possible.
+# - Previous default sphere was 320 triangles and around 2.7 LI.
+# - This version targets a 96-triangle default upload sphere.
 # =========================================================
 
 import os
@@ -31,7 +32,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 
 app = Flask(__name__)
 
-VERSION = "M3D3_NN_STYLE_LOW_LI_UPLOAD_BASE_2026_05_04"
+VERSION = "M3D3_NN_STYLE_ULTRA_LOW_LI_UPLOAD_2026_05_04"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
@@ -50,20 +51,28 @@ DEFAULT_QUALITY = 16
 MIN_QUALITY = 4
 MAX_QUALITY = 24
 
-UPLOAD_SPHERE_LON = 12
-UPLOAD_SPHERE_LAT = 8
+UPLOAD_SPHERE_SEGMENTS = 12
+UPLOAD_SPHERE_RINGS = 4
 
-PREVIEW_SPHERE_LON = 40
-PREVIEW_SPHERE_LAT = 20
+LOW_SPHERE_SEGMENTS = 8
+LOW_SPHERE_RINGS = 3
 
-UPLOAD_CYLINDER_SECTIONS = 12
-UPLOAD_CONE_SECTIONS = 12
-UPLOAD_TORUS_MAJOR = 16
-UPLOAD_TORUS_MINOR = 6
+PREVIEW_SPHERE_SEGMENTS = 32
+PREVIEW_SPHERE_RINGS = 14
 
-PREVIEW_CYLINDER_SECTIONS = 40
-PREVIEW_CONE_SECTIONS = 40
-PREVIEW_TORUS_MAJOR = 40
+UPLOAD_CYLINDER_SECTIONS = 10
+UPLOAD_CONE_SECTIONS = 10
+UPLOAD_TORUS_MAJOR = 14
+UPLOAD_TORUS_MINOR = 5
+
+LOW_CYLINDER_SECTIONS = 6
+LOW_CONE_SECTIONS = 6
+LOW_TORUS_MAJOR = 10
+LOW_TORUS_MINOR = 4
+
+PREVIEW_CYLINDER_SECTIONS = 36
+PREVIEW_CONE_SECTIONS = 36
+PREVIEW_TORUS_MAJOR = 36
 PREVIEW_TORUS_MINOR = 12
 
 
@@ -307,14 +316,68 @@ def make_cone_mesh(sections: int) -> trimesh.Trimesh:
     return clean_mesh(trimesh.creation.cone(radius=0.5, height=1.0, sections=sections))
 
 
-def make_sphere_mesh(lon: int, lat: int) -> trimesh.Trimesh:
-    lon = max(8, int(lon))
-    lat = max(6, int(lat))
-    return clean_mesh(trimesh.creation.uv_sphere(radius=0.5, count=[lon, lat]))
+def make_uv_sphere_mesh(segments: int, rings: int) -> trimesh.Trimesh:
+    segments = max(6, int(segments))
+    rings = max(2, int(rings))
+
+    vertices: List[List[float]] = []
+    faces: List[List[int]] = []
+
+    top_index = 0
+    bottom_index = 1
+
+    vertices.append([0.0, 0.0, 0.5])
+    vertices.append([0.0, 0.0, -0.5])
+
+    for r in range(1, rings + 1):
+        phi = np.pi * float(r) / float(rings + 1)
+        z = 0.5 * np.cos(phi)
+        radius = 0.5 * np.sin(phi)
+
+        for s in range(segments):
+            theta = 2.0 * np.pi * float(s) / float(segments)
+            x = radius * np.cos(theta)
+            y = radius * np.sin(theta)
+            vertices.append([x, y, z])
+
+    def ring_index(ring_number: int, segment_number: int) -> int:
+        return 2 + (ring_number * segments) + (segment_number % segments)
+
+    for s in range(segments):
+        faces.append([
+            top_index,
+            ring_index(0, s),
+            ring_index(0, s + 1)
+        ])
+
+    for r in range(rings - 1):
+        for s in range(segments):
+            a = ring_index(r, s)
+            b = ring_index(r, s + 1)
+            c = ring_index(r + 1, s)
+            d = ring_index(r + 1, s + 1)
+
+            faces.append([a, c, b])
+            faces.append([b, c, d])
+
+    last_ring = rings - 1
+
+    for s in range(segments):
+        faces.append([
+            ring_index(last_ring, s + 1),
+            ring_index(last_ring, s),
+            bottom_index
+        ])
+
+    return clean_mesh(trimesh.Trimesh(
+        vertices=np.array(vertices, dtype=float),
+        faces=np.array(faces, dtype=int),
+        process=False
+    ))
 
 
 def make_torus_mesh(major_sections: int, minor_sections: int) -> trimesh.Trimesh:
-    major_sections = max(12, int(major_sections))
+    major_sections = max(8, int(major_sections))
     minor_sections = max(4, int(minor_sections))
 
     try:
@@ -361,29 +424,29 @@ def make_prism_mesh() -> trimesh.Trimesh:
 
 def build_base_mesh(shape: str, mode: str, quality: int) -> trimesh.Trimesh:
     if mode == "preview":
-        sphere_lon = max(PREVIEW_SPHERE_LON, quality * 2)
-        sphere_lat = max(PREVIEW_SPHERE_LAT, quality)
+        sphere_segments = max(PREVIEW_SPHERE_SEGMENTS, quality * 2)
+        sphere_rings = max(PREVIEW_SPHERE_RINGS, quality)
         cylinder_sections = max(PREVIEW_CYLINDER_SECTIONS, quality * 2)
         cone_sections = max(PREVIEW_CONE_SECTIONS, quality * 2)
         torus_major = max(PREVIEW_TORUS_MAJOR, quality * 2)
         torus_minor = max(PREVIEW_TORUS_MINOR, quality // 2)
-    elif mode == "ultra":
-        sphere_lon = 10
-        sphere_lat = 6
-        cylinder_sections = 8
-        cone_sections = 8
-        torus_major = 12
-        torus_minor = 4
+    elif mode == "low":
+        sphere_segments = LOW_SPHERE_SEGMENTS
+        sphere_rings = LOW_SPHERE_RINGS
+        cylinder_sections = LOW_CYLINDER_SECTIONS
+        cone_sections = LOW_CONE_SECTIONS
+        torus_major = LOW_TORUS_MAJOR
+        torus_minor = LOW_TORUS_MINOR
     else:
-        sphere_lon = UPLOAD_SPHERE_LON
-        sphere_lat = UPLOAD_SPHERE_LAT
+        sphere_segments = UPLOAD_SPHERE_SEGMENTS
+        sphere_rings = UPLOAD_SPHERE_RINGS
         cylinder_sections = UPLOAD_CYLINDER_SECTIONS
         cone_sections = UPLOAD_CONE_SECTIONS
         torus_major = UPLOAD_TORUS_MAJOR
         torus_minor = UPLOAD_TORUS_MINOR
 
     if shape == "SPHERE":
-        return make_sphere_mesh(sphere_lon, sphere_lat)
+        return make_uv_sphere_mesh(sphere_segments, sphere_rings)
 
     if shape == "CYLINDER":
         return make_cylinder_mesh(cylinder_sections)
@@ -784,7 +847,7 @@ def build_box_proxy_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any
 def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dict[str, Any]:
     upload_records, upload_merged, upload_report = build_mesh_records(prims, "upload", quality)
     preview_records, preview_merged, preview_report = build_mesh_records(prims, "preview", quality)
-    ultra_records, ultra_merged, ultra_report = build_mesh_records(prims, "ultra", quality)
+    low_records, low_merged, low_report = build_mesh_records(prims, "low", quality)
 
     uid = uuid.uuid4().hex[:8]
     package_id = uid
@@ -819,9 +882,9 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
 
     write_multi_geometry_dae(preview_records, high_path, name + "_HIGH")
     write_multi_geometry_dae(upload_records, medium_path, name + "_MEDIUM")
-    write_multi_geometry_dae(ultra_records, low_path, name + "_LOW")
-    write_multi_geometry_dae(build_box_proxy_records(ultra_records), lowest_path, name + "_LOWEST")
-    write_multi_geometry_dae(build_box_proxy_records(ultra_records), phys_path, name + "_PHYS")
+    write_multi_geometry_dae(low_records, low_path, name + "_LOW")
+    write_multi_geometry_dae(build_box_proxy_records(low_records), lowest_path, name + "_LOWEST")
+    write_multi_geometry_dae(build_box_proxy_records(low_records), phys_path, name + "_PHYS")
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(dae_path, "SL_Ready.dae")
@@ -844,7 +907,7 @@ def produce_package(prims: List[Dict[str, Any]], name: str, quality: int) -> Dic
             "version": VERSION,
             "upload": upload_report,
             "preview": preview_report,
-            "ultra": ultra_report,
+            "low": low_report,
             "dae": dae_meta,
             "preview_files": preview_meta
         }
@@ -888,7 +951,7 @@ def health():
     return jsonify({
         "ok": True,
         "version": VERSION,
-        "server": "M3D3 NN Style Low LI Upload Base",
+        "server": "M3D3 NN Style Ultra Low LI Upload Base",
         "active_jobs": list(jobs.keys()),
         "result_jobs": list(results.keys()),
         "outputs": [f for f in os.listdir(OUTPUT_DIR) if not f.endswith(".meta.json")]
@@ -1026,7 +1089,7 @@ def job_page(package_id: str):
     summary = package.get("summary", {})
     upload = summary.get("upload", {})
     preview = summary.get("preview", {})
-    ultra = summary.get("ultra", {})
+    low = summary.get("low", {})
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -1100,7 +1163,7 @@ def job_page(package_id: str):
             <p class="meta">Package ID: <code>{package_id}</code></p>
             <p class="meta">SL Ready Upload: <code>{upload.get("faces", "?")} faces</code> / <code>{upload.get("vertices", "?")} vertices</code></p>
             <p class="meta">Preview Mesh: <code>{preview.get("faces", "?")} faces</code> / <code>{preview.get("vertices", "?")} vertices</code></p>
-            <p class="meta">Low LOD Mesh: <code>{ultra.get("faces", "?")} faces</code> / <code>{ultra.get("vertices", "?")} vertices</code></p>
+            <p class="meta">Low LOD Mesh: <code>{low.get("faces", "?")} faces</code> / <code>{low.get("vertices", "?")} vertices</code></p>
             <p class="meta">Dimensions: <code>{upload.get("dimensions", "?")}</code></p>
         </div>
 
